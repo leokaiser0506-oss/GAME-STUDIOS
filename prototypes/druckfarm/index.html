@@ -357,13 +357,10 @@ function chooseFil(p, f) { if (FIL_TIER[f] > p.tier) { sfx.bad(); return; } p.fi
 function cycleFil(p) { const ok = FIL.filter(f => FIL_TIER[f] <= p.tier); p.fil = ok[(ok.indexOf(p.fil) + 1) % ok.length]; sfx.click(); }
 
 // ---- STORAGE AND SHIPPING (server side in Roblox) -------------------------------------------------
-function packAll() {
+function packAll() { // cartons are paid out of the delivery, so packing never needs cash on hand
   const n = state.store.length;
   if (!n) { sfx.bad(); return; }
-  const k = tune.pack_cost > 0 ? Math.min(n, Math.floor(state.money / tune.pack_cost)) : n;
-  if (k <= 0) { sfx.bad(); return; }
-  if (tune.pack_cost > 0 && !spend('Kartons', tune.pack_cost * k, `Kartons: ${k} Stück`)) return;
-  state.packQ.push(...state.store.splice(0, k)); sfx.click();
+  state.packQ.push(...state.store.splice(0, n)); sfx.click();
 }
 function shipAll() {
   if (state.truck.st !== 'dock' || !state.packed.length) { sfx.bad(); return; }
@@ -389,8 +386,10 @@ function updateLogistics(dt) {
   if (tr.st === 'away') {
     tr.t += dt;
     if (tr.t >= tune.ship_time) {
+      const boxes = tune.pack_cost * tr.n;
       earn(tr.value, `Lieferung: ${tr.n} Pakete`); state.today.shipped += tr.n;
-      fx(105, 180, '+' + eur(tr.value), '#7ee08f'); sfx.coin();
+      if (boxes > 0) { state.money -= boxes; state.today.out.Kartons += boxes; ledger(`Kartons: ${tr.n} Stück`, -boxes); }
+      fx(105, 180, '+' + eur(tr.value - boxes), '#7ee08f'); sfx.coin();
       state.truck = { st: 'dock', t: 0, value: 0, n: 0 };
     }
   }
@@ -1193,7 +1192,7 @@ function panelStation(kind, hint) {
   } else if (kind === 'pack') {
     card(838, 62, 436, 404, 'Packtisch');
     text(`Im Lager: ${state.store.length} Teile`, 850, 104, 15, '#f1f4f7', 'left', 'bold');
-    text(`Karton: ${eur(tune.pack_cost)} pro Teil · ${num(tune.pack_time, 2)} s pro Teil`, 850, 128, 12, '#9aa5b1', 'left');
+    text(`Karton: ${eur(tune.pack_cost)} pro Teil, wird von der Lieferung abgezogen · ${num(tune.pack_time, 2)} s pro Teil`, 850, 128, 12, '#9aa5b1', 'left');
     text(`In Arbeit: ${state.packQ.length} · fertig verpackt: ${state.packed.length}`, 850, 150, 13, '#c6cdd5', 'left');
     for (let i = 0; i < Math.min(12, state.packed.length); i++) drawBox(870 + (i % 6) * 34, 220 + Math.floor(i / 6) * 32, 1.6);
   } else if (kind === 'ship') {
