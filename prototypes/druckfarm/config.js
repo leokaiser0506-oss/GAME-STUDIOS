@@ -49,7 +49,7 @@ window.CONFIG = {
   obj_helmet_g: { value: 300, min: 1, max: 1000, step: 5 },   obj_helmet_time: { value: 60, min: 1, max: 240, step: 1 },
   obj_helmet_price: { value: 210, min: 1, max: 2000, step: 5 }, obj_helmet_plan: { value: 1500, min: 0, max: 10000, step: 50 },
   obj_drone_g: { value: 250, min: 1, max: 1000, step: 5 },    obj_drone_time: { value: 60, min: 1, max: 240, step: 1 },
-  obj_drone_price: { value: 130, min: 1, max: 2000, step: 5 }, obj_drone_plan: { value: 4000, min: 0, max: 20000, step: 100 },
+  obj_drone_price: { value: 210, min: 1, max: 2000, step: 5 }, obj_drone_plan: { value: 4000, min: 0, max: 20000, step: 100 },
 
   // --- Printers: speed multiplier, wear per printing second (%), maintenance €, repair €, upgrade € ---
   printer_base_price:   { value: 100,  min: 10, max: 1000, step: 5 },  // € for the 2nd printer
@@ -89,6 +89,7 @@ window.CONFIG = {
 
   // --- Spool per printer ---
   spool_max: { value: 1000, min: 250, max: 3000, step: 50 },    // g a printer's spool holder takes
+  start_spool_new: { value: 1, min: 0, max: 4, step: 1 },       // packs of Billig-PLA a newly bought printer comes with
 
   // --- Automation per printer (bought at the printer) ---
   auto_maint_price: { value: 180, min: 0, max: 3000, step: 10 },  // € Wartungs-Roboter
@@ -103,7 +104,8 @@ window.CONFIG = {
   pack_time:       { value: 0.25, min: 0.02, max: 3, step: 0.01 }, // s per item at the packing table
   pack_cost:       { value: 1,   min: 0, max: 20, step: 0.5 },    // € box per item
   ship_time:       { value: 8,   min: 1, max: 60, step: 1 },      // s the van is away; money arrives when it is back
-  auto_ship_price: { value: 1200, min: 0, max: 20000, step: 50 }, // € Auto-Versand (conveyor + auto packing)
+  auto_pack_price: { value: 400, min: 0, max: 10000, step: 10 },  // € Packautomat: packs the shelf by itself, shipping stays by hand
+  auto_ship_price: { value: 1200, min: 0, max: 20000, step: 50 }, // € Auto-Versand: ships packed parcels by itself (needs the Packautomat)
   auto_ship_every: { value: 6,   min: 1, max: 60, step: 1 },      // s between automatic pack-and-ship checks
 
   // --- Customer orders (Auftragsbrett): hand work, never shipped by Auto-Versand ---
@@ -111,13 +113,25 @@ window.CONFIG = {
   order_max_active: { value: 2,   min: 1, max: 6, step: 1 },       // orders you can hold at once
   order_mult:       { value: 1.6, min: 1, max: 4, step: 0.05 },    // reward = normal price x this
   order_penalty:    { value: 0.2, min: 0, max: 1, step: 0.05 },    // share of the order value lost on a missed deadline
-  order_time:       { value: 150, min: 30, max: 900, step: 10 },   // s from accepting to the deadline
+  order_time_base:  { value: 45,  min: 0, max: 600, step: 5 },     // s every order gets on top of its print time
+  order_time_factor:{ value: 0.8, min: 0.3, max: 3, step: 0.05 },  // x (parts x print time on your best printer); never under 1.0 with one printer
+  order_special_every: { value: 4, min: 2, max: 20, step: 1 },     // every n-th order is special: mixed or rush
+  order_mixed_mult: { value: 1.8, min: 1, max: 4, step: 0.05 },    // reward multiplier of a mixed order (two objects)
+  order_rush_mult:  { value: 2.2, min: 1, max: 5, step: 0.05 },    // reward multiplier of a rush order
+  order_rush_time:  { value: 0.5, min: 0.1, max: 1, step: 0.05 },  // a rush order's deadline is this share of a normal one
   order_n_base:     { value: 4,   min: 1, max: 30, step: 1 },      // parts in an order at tier 0
   order_n_per_tier: { value: 3,   min: 0, max: 20, step: 1 },      // extra parts per unlocked printer tier
   order_n_spread:   { value: 2,   min: 0, max: 10, step: 1 },      // random extra parts, 0..this
 
   // --- Saving, camera, touch ---
   save_every: { value: 30,   min: 5, max: 300, step: 5 },          // s between autosaves (plus every day end)
-  cam_zoom:   { value: 1.45, min: 1, max: 2.5, step: 0.05 },       // fixed camera zoom; the camera follows the player
+  cam_zoom:   { value: 1.15, min: 1, max: 2.5, step: 0.05 },       // fixed camera zoom; the camera follows the player
   joy_radius: { value: 60,   min: 30, max: 120, step: 5 },         // px of the touch joystick
+
+  // --- Bank credit instead of bankruptcy ---
+  debt_interest:  { value: 0.10, min: 0, max: 0.5, step: 0.01 },   // interest on the credit per day
+  confirm_window: { value: 4,    min: 1, max: 10, step: 0.5 },     // s in which a second press confirms a purchase that dips below today's rent
+
+  // --- Walking ---
+  path_grid: { value: 12, min: 6, max: 24, step: 1 },             // px per cell of the click-to-walk path grid
 };

@@ -229,7 +229,7 @@ const SAVE_KEY = 'druckfarm-save-v2';
 let scene, state, anim = 0, ui = [];
 function newPrinter(slot, tier = 0) {
   return { slot, tier, wear: 0, job: 'key', fil: 'cheap', spool: { type: 'cheap', g: 0 }, status: 'idle', prog: 0, timer: 0,
-    auto: false, maintQueued: false, cur: null, why: '', held: null, autoMaint: false, autoFeed: false };
+    auto: false, maintQueued: false, upQueued: false, cur: null, why: '', held: null, autoMaint: false, autoFeed: false, forOrder: null, prevJob: null };
 }
 function freshToday() {
   return { inc: 0, out: { Filament: 0, Wartung: 0, Reparatur: 0, Drucker: 0, Baupläne: 0, Upgrades: 0, Automatik: 0, Kartons: 0, Lager: 0, Strafen: 0 }, prints: 0, fails: 0, clogs: 0, shipped: 0, orders: 0 };
@@ -243,11 +243,13 @@ function reset() {
     money: tune.start_money, day: 1, dayT: 0, warn: false,
     printers: [p0],
     plans: { key: true, holder: false, dragon: false, gear: false, helmet: false, drone: false },
-    stats: { prints: 0, fails: 0, clogs: 0, maint: 0, repairs: 0, earned: 0, bestDay: 0, refills: 0, packed: 0, shipped: 0, autos: 0, robotMaint: 0, robotClogs: 0, ordersDone: 0, ordersMissed: 0, firstAutoT: -1,
+    stats: { prints: 0, fails: 0, clogs: 0, maint: 0, repairs: 0, earned: 0, bestDay: 0, refills: 0, packed: 0, shipped: 0, autos: 0, robotMaint: 0, robotClogs: 0, ordersDone: 0, ordersMissed: 0, firstAutoT: -1, creditDays: 0, borrowed: 0, interest: 0,
+      ordersByTier: [{ done: 0, missed: 0 }, { done: 0, missed: 0 }, { done: 0, missed: 0 }],
       byFil: { cheap: 0, plus: 0, petg: 0, resin: 0 } },
     today: freshToday(), ledger: [], ms: 0, big: 0, summary: null, stuckT: 0, started: false, saveT: 0,
     offers: [], orders: [], orderId: 0, carry: null,
     store: [], storeLvl: 0, packQ: [], packT: 0, packed: [], truck: { st: 'dock', t: 0, value: 0, n: 0 }, autoShip: false, autoShipT: 0,
+    autoPack: false, autoPackT: 0, debt: 0, spools: { cheap: 0, plus: 0, petg: 0, resin: 0 },
     player: { x: s0.px, y: s0.py + 6, dir: 1, walk: 0, moving: false, to: null },
     near: null,
     fx: [], flying: [], confetti: [], banner: null, overReason: '',
@@ -272,6 +274,9 @@ function continueGame(s) {
   state.stats = Object.assign({}, st0, s.stats, { byFil: Object.assign({}, st0.byFil, s.stats && s.stats.byFil) });
   state.today = Object.assign({}, td0, s.today, { out: Object.assign({}, td0.out, s.today && s.today.out) });
   state.fx = []; state.flying = []; state.confetti = []; state.banner = null; state.player.to = null; scene = 'play';
+  const toParts = o => (o.parts ? o : Object.assign(o, { kind: 'normal', mult: tune.order_mult, parts: [{ obj: o.obj, fil: o.fil, n: o.n }] }));
+  state.orders.forEach(toParts); state.offers.forEach(toParts);
+  state.printers.forEach(p => { if (p.upQueued === undefined) { p.upQueued = false; p.forOrder = null; p.prevJob = null; } });
   if (!state.offers || !state.offers.length) fillOffers();
   cam.cx = state.player.x; cam.cy = state.player.y - 60; clampCam();
 }
@@ -287,27 +292,48 @@ function ledger(textS, amt) {
   state.ledger.unshift({ text: textS, amt, t: state.t });
   if (state.ledger.length > 6) state.ledger.pop();
 }
-function spend(cat, amt, label) {
+// a purchase that would leave less than today's rent asks for a second press (Roblox: a confirm prompt)
+let pendingBuy = null;
+function confirmBuy(amt, label) {
+  if (state.money - amt >= rentToday()) { pendingBuy = null; return true; }
+  if (pendingBuy && pendingBuy.label === label && state.t - pendingBuy.t <= tune.confirm_window) { pendingBuy = null; return true; }
+  pendingBuy = { label, t: state.t };
+  state.banner = { s: `Miete in ${Math.ceil(tune.day_length - state.dayT)} s: ${eur(rentToday())}. Nochmal drücken, um trotzdem zu kaufen`, t: 0, c: '#b3262c' };
+  sfx.bad(); return false;
+}
+function spend(cat, amt, label, confirm = false) {
   if (state.money < amt) { sfx.bad(); return false; }
+  if (confirm && !confirmBuy(amt, label)) return false;
   state.money -= amt; state.today.out[cat] = (state.today.out[cat] || 0) + amt; ledger(label, -amt); return true;
 }
+function payIn(amt) { // money coming in pays the bank credit first
+  const pay = Math.min(state.debt, amt);
+  if (pay > 0) { state.debt -= pay; ledger('Kredit-Tilgung', -pay); }
+  state.money += amt - pay;
+}
 function earn(amt, label) {
-  state.money += amt; state.today.inc += amt; state.stats.earned += amt; state.score = Math.round(state.stats.earned);
-  ledger(label, amt);
+  state.today.inc += amt; state.stats.earned += amt; state.score = Math.round(state.stats.earned);
+  ledger(label, amt); payIn(amt);
 }
 function fx(x, y, s, c) { state.fx.push({ x, y, s, c, t: 0, life: 1.6 }); }
 function fxAt(p, s, c) { const sp = slotPos(p.slot); fx(sp.bx, sp.by - 150, s, c); }
 
 // ---- PRINTERS (server side in Roblox) -----------------------------------------------------------
+function swapSpool(p, type) { // the loaded spool goes onto the shelf as an opened spool; an opened one of `type` comes back
+  if (p.spool.type === type) return;
+  if (p.spool.g > 0) { state.spools[p.spool.type] += p.spool.g; fxAt(p, `${Math.round(p.spool.g)} g ${FIL_SHORT[p.spool.type]} ins Lager`, '#cfe9d4'); }
+  const take = Math.min(state.spools[type], tune.spool_max);
+  state.spools[type] -= take; p.spool = { type, g: take };
+}
 function refill(p, auto = false) {
   if (!p) return false;
   const f = filDef(p.fil);
   if (f.tier > p.tier) { sfx.bad(); return false; }
-  const swap = p.spool.type !== p.fil && p.spool.g > 0;
-  if (!swap && p.spool.g + tune.pack_grams > tune.spool_max) { if (!auto) { fxAt(p, 'Spule ist voll', '#f3b25b'); sfx.bad(); } return false; }
-  if (!spend('Filament', f.price, `${auto ? 'Zuführung' : 'Filament'} #${p.slot + 1}: ${f.name} +${tune.pack_grams} g`)) return false;
-  if (swap) { fxAt(p, `Spule gewechselt, ${Math.round(p.spool.g)} g weg`, '#f3b25b'); p.spool.g = 0; }
-  p.spool.type = p.fil; p.spool.g += tune.pack_grams; state.stats.refills++;
+  const g = p.spool.type === p.fil ? p.spool.g : p.spool.g === 0 ? state.spools[p.fil] : Math.min(state.spools[p.fil], tune.spool_max);
+  if (g + tune.pack_grams > tune.spool_max) { if (!auto) { fxAt(p, 'Spule ist voll', '#f3b25b'); sfx.bad(); } return false; }
+  if (!spend('Filament', f.price, `${auto ? 'Zuführung' : 'Filament'} #${p.slot + 1}: ${f.name} +${tune.pack_grams} g`, !auto)) return false;
+  swapSpool(p, p.fil);
+  p.spool.g += tune.pack_grams; state.stats.refills++;
   if (!auto) sfx.buy();
   if (p.status === 'wait' && p.auto) tryStart(p);
   return true;
@@ -316,7 +342,10 @@ function refill(p, auto = false) {
 function printTime(p, job, fil) { return objDef(job).time / (tierDef(p.tier).speed * filDef(fil).speed); }
 function printWear(p, job, fil) { return tierDef(p.tier).wear * printTime(p, job, fil); }
 function tryStart(p) {
-  const o = objDef(p.job), f = filDef(p.spool.type);
+  const o = objDef(p.job);
+  // change to the wanted filament when an opened spool of it waits, when printing for an order, or when this spool is empty
+  if (p.spool.type !== p.fil && FIL_TIER[p.fil] <= p.tier && (state.spools[p.fil] > 0 || p.forOrder || p.spool.g < o.g)) swapSpool(p, p.fil);
+  const f = filDef(p.spool.type);
   if (!state.plans[p.job] || o.tier > p.tier) { p.status = 'wait'; p.why = 'Auftrag passt nicht'; return false; }
   if (p.spool.g < o.g && p.autoFeed && state.money >= filDef(p.fil).price) refill(p, true);
   if (p.spool.g < o.g) { p.status = 'wait'; p.why = 'Spule leer'; return false; }
@@ -353,26 +382,43 @@ function doRepair(p) {
   p.status = 'repair'; p.timer = 0; state.stats.repairs++; sfx.click();
 }
 function doUpgrade(p) {
-  if (!p || p.tier >= 2 || p.status === 'print' || p.status === 'maint' || p.status === 'repair') return;
-  if (!spend('Upgrades', tierDef(p.tier).upgrade, `Upgrade #${p.slot + 1} auf ${TIER_NAME[p.tier + 1]}`)) return;
+  if (!p || p.tier >= 2) return;
+  const cost = tierDef(p.tier).upgrade, label = `Upgrade #${p.slot + 1} auf ${TIER_NAME[p.tier + 1]}`;
+  if (busy(p)) { // U while it works: the upgrade waits for the end of the print (and is paid then)
+    if (p.upQueued) { p.upQueued = false; sfx.click(); return; }
+    if (state.money < cost) { sfx.bad(); return; }
+    if (!confirmBuy(cost, label)) return;
+    p.upQueued = true; sfx.click(); fxAt(p, `Upgrade vorgemerkt: ${TIER_NAME[p.tier + 1]}`, '#d6b8ff'); return;
+  }
+  if (!spend('Upgrades', cost, label, true)) return;
+  applyUpgrade(p);
+}
+function runQueuedUpgrade(p) { // after the print: pay and upgrade, or drop it when the money is gone
+  if (!p.upQueued) return false;
+  p.upQueued = false;
+  if (!spend('Upgrades', tierDef(p.tier).upgrade, `Upgrade #${p.slot + 1} auf ${TIER_NAME[p.tier + 1]}`)) { fxAt(p, 'Upgrade: zu wenig Geld', '#ff8a8a'); return false; }
+  applyUpgrade(p); return true;
+}
+function applyUpgrade(p) {
   p.tier++; p.wear = 0; if (p.status !== 'held') p.status = 'idle'; sfx.buy();
   fxAt(p, TIER_NAME[p.tier] + '!', '#ffd166');
   if (p.auto && p.status === 'idle') tryStart(p);
 }
 function buyAuto(p, kind) {
   if (!p) return;
-  if (kind === 'maint' && !p.autoMaint) { if (spend('Automatik', tune.auto_maint_price, `Wartungs-Roboter #${p.slot + 1}`)) { p.autoMaint = true; state.stats.autos++; if (state.stats.firstAutoT < 0) state.stats.firstAutoT = state.t; sfx.buy(); fxAt(p, 'Wartungs-Roboter!', '#ffd166'); } }
-  if (kind === 'feed' && !p.autoFeed) { if (spend('Automatik', tune.auto_feed_price, `Filament-Zuführung #${p.slot + 1}`)) { p.autoFeed = true; state.stats.autos++; if (state.stats.firstAutoT < 0) state.stats.firstAutoT = state.t; sfx.buy(); fxAt(p, 'Filament-Zuführung!', '#ffd166'); if (p.status === 'wait' && p.auto) tryStart(p); } }
+  if (kind === 'maint' && !p.autoMaint) { if (spend('Automatik', tune.auto_maint_price, `Wartungs-Roboter #${p.slot + 1}`, true)) { p.autoMaint = true; state.stats.autos++; if (state.stats.firstAutoT < 0) state.stats.firstAutoT = state.t; sfx.buy(); fxAt(p, 'Wartungs-Roboter!', '#ffd166'); } }
+  if (kind === 'feed' && !p.autoFeed) { if (spend('Automatik', tune.auto_feed_price, `Filament-Zuführung #${p.slot + 1}`, true)) { p.autoFeed = true; state.stats.autos++; if (state.stats.firstAutoT < 0) state.stats.firstAutoT = state.t; sfx.buy(); fxAt(p, 'Filament-Zuführung!', '#ffd166'); if (p.status === 'wait' && p.auto) tryStart(p); } }
 }
 function buyPrinter(slot) {
   if (state.printers.length >= 8 || printerAt(slot)) return;
-  if (!spend('Drucker', nextPrice(), `Neuer Drucker #${slot + 1}`)) return;
-  state.printers.push(newPrinter(slot)); sfx.buy();
-  const s = slotPos(slot); fx(s.bx, s.by - 120, 'Neuer Drucker! Spule leer: F', '#7ee08f');
+  if (!spend('Drucker', nextPrice(), `Neuer Drucker #${slot + 1}`, true)) return;
+  const np = newPrinter(slot); np.spool.g = tune.start_spool_new * tune.pack_grams; // comes with a pack of Billig-PLA
+  state.printers.push(np); sfx.buy();
+  const s = slotPos(slot); fx(s.bx, s.by - 120, np.spool.g > 0 ? 'Neuer Drucker! E = Start' : 'Neuer Drucker! Spule leer: F', '#7ee08f');
 }
 function buyPlan(o) {
   if (state.plans[o]) return;
-  if (!spend('Baupläne', objDef(o).plan, `Bauplan ${OBJ_NAME[o]}`)) return;
+  if (!spend('Baupläne', objDef(o).plan, `Bauplan ${OBJ_NAME[o]}`, true)) return;
   state.plans[o] = true; sfx.buy();
 }
 function chooseJob(p, o) {
@@ -404,37 +450,69 @@ function shipAll() {
   fx(105, 180, `Lieferwagen fährt: ${state.truck.n} Pakete`, '#ffd98a');
 }
 function upgradeStore() {
-  if (spend('Lager', storeUpPrice(), `Lager-Regal +${tune.store_cap_add} Plätze`)) { state.storeLvl++; sfx.buy(); fx(105, 520, `Lager: ${storeCap()} Plätze`, '#7ee08f'); }
+  if (spend('Lager', storeUpPrice(), `Lager-Regal +${tune.store_cap_add} Plätze`, true)) { state.storeLvl++; sfx.buy(); fx(105, 520, `Lager: ${storeCap()} Plätze`, '#7ee08f'); }
+}
+function buyAutoPack() {
+  if (state.autoPack) return;
+  if (spend('Automatik', tune.auto_pack_price, 'Packautomat', true)) { state.autoPack = true; state.stats.autos++; sfx.buy(); fx(105, 380, 'Packautomat!', '#ffd166'); }
 }
 function buyAutoShip() {
-  if (state.autoShip) return;
-  if (spend('Automatik', tune.auto_ship_price, 'Auto-Versand (Förderband)')) { state.autoShip = true; state.stats.autos++; sfx.buy(); fx(105, 200, 'Auto-Versand!', '#ffd166'); }
+  if (state.autoShip || !state.autoPack) { sfx.bad(); return; }
+  if (spend('Automatik', tune.auto_ship_price, 'Auto-Versand (Förderband)', true)) { state.autoShip = true; state.stats.autos++; sfx.buy(); fx(105, 200, 'Auto-Versand!', '#ffd166'); }
 }
 // ---- CUSTOMER ORDERS (server side in Roblox; the board is a SurfaceGui with prompts) ----------------
+// an order has parts ({obj, fil, n}); a mixed order has two, a rush order has half the time and a bigger reward
+const orderN = o => o.parts.reduce((a, q) => a + q.n, 0);
+const partGot = (o, i) => state.store.filter(it => it.res === o.id && it.part === i).length;
+const orderGot = o => state.carry === o.id ? orderN(o) : o.parts.reduce((a, q, i) => a + Math.min(q.n, partGot(o, i)), 0);
+const orderReady = o => state.carry !== o.id && o.parts.every((q, i) => partGot(o, i) >= q.n);
+const partTier = q => Math.max(OBJ_TIER[q.obj], FIL_TIER[q.fil]);
+const orderTier = o => Math.max(...o.parts.map(partTier));
+const KIND_NAME = { normal: '', mixed: 'GEMISCHT', rush: 'EILIG' };
+function orderName(o) { return o.parts.map(q => `${q.n}× ${OBJ_SHORT[q.obj]}`).join(' + ') + ` (${FIL_SHORT[o.parts[0].fil]})`; }
+function bestTime(obj, fil) { // print time on the best printer you own that can make it
+  let t = Infinity;
+  for (const p of state.printers) if (p.tier >= Math.max(OBJ_TIER[obj], FIL_TIER[fil])) t = Math.min(t, printTime(p, obj, fil));
+  return t === Infinity ? objDef(obj).time / filDef(fil).speed : t;
+}
+function orderTime(o) { // base + parts x print time x factor; with one printer the factor is at least 1
+  const f = state.printers.length <= 1 ? Math.max(1, tune.order_time_factor) : tune.order_time_factor;
+  const t = tune.order_time_base + o.parts.reduce((a, q) => a + q.n * bestTime(q.obj, q.fil) * f, 0);
+  return o.kind === 'rush' ? t * tune.order_rush_time : t;
+}
 function makeOffer() {
   const mt = maxTier();
   const objs = OBJ.filter(o => state.plans[o] && OBJ_TIER[o] <= mt), fils = FIL.filter(f => FIL_TIER[f] <= mt);
   const pick = a => a[Math.min(a.length - 1, Math.floor(Math.sqrt(rng()) * a.length))]; // leans to the newest unlock
-  const obj = pick(objs), fil = pick(fils);
+  const id = ++state.orderId, fil = pick(fils);
   const n = tune.order_n_base + tune.order_n_per_tier * mt + Math.floor(rng() * (tune.order_n_spread + 1));
-  return { id: ++state.orderId, obj, fil, n, reward: Math.round(n * objDef(obj).price * filDef(fil).value * tune.order_mult) };
+  let kind = 'normal', parts = [{ obj: pick(objs), fil, n }], mult = tune.order_mult;
+  if (id % tune.order_special_every === 0) {
+    if (objs.length >= 2 && rng() < 0.5) {
+      const a = pick(objs); let b = objs[Math.floor(rng() * objs.length)]; if (b === a) b = objs[(objs.indexOf(a) + 1) % objs.length];
+      const h = Math.max(1, Math.round(n / 2));
+      kind = 'mixed'; parts = [{ obj: a, fil, n: h }, { obj: b, fil, n: h }]; mult = tune.order_mixed_mult;
+    } else { kind = 'rush'; mult = tune.order_rush_mult; }
+  }
+  return { id, kind, parts, mult, reward: Math.round(parts.reduce((a, q) => a + q.n * objDef(q.obj).price * filDef(q.fil).value, 0) * mult) };
 }
 function fillOffers() { while (state.offers.length < tune.order_slots) state.offers.push(makeOffer()); }
 function acceptOffer(i) {
   const of = state.offers[i];
   if (!of || state.orders.length >= tune.order_max_active) { sfx.bad(); return; }
   state.offers.splice(i, 1);
-  state.orders.push(Object.assign(of, { deadline: state.t + tune.order_time }));
+  const time = orderTime(of);
+  state.orders.push(Object.assign(of, { deadline: state.t + time, time }));
   reserveAll(); fillOffers(); sfx.buy();
-  fx(709, 200, `Angenommen: ${of.n}× ${OBJ_SHORT[of.obj]} (${FIL_SHORT[of.fil]})`, '#ffd98a');
+  fx(709, 300, `Angenommen: ${orderName(of)} · ${Math.round(time)} s`, '#ffd98a');
 }
-const reservedFor = o => state.store.filter(it => it.res === o.id).length;
-const orderReady = o => state.carry !== o.id && reservedFor(o) >= o.n;
 function reserveAll() { // matching parts on the shelf are held for the orders, oldest order first
   for (const o of state.orders) {
     if (state.carry === o.id) continue;
-    let have = reservedFor(o);
-    for (const it of state.store) { if (have >= o.n) break; if (!it.res && it.id === o.obj && it.fil === o.fil) { it.res = o.id; have++; } }
+    o.parts.forEach((q, i) => {
+      let have = partGot(o, i);
+      for (const it of state.store) { if (have >= q.n) break; if (!it.res && it.id === q.obj && it.fil === q.fil) { it.res = o.id; it.part = i; have++; } }
+    });
   }
 }
 function takeOrder() {
@@ -448,26 +526,51 @@ function deliverOrder() {
   state.carry = null;
   if (!o) return;
   state.orders = state.orders.filter(q => q !== o);
-  earn(o.reward, `Auftrag: ${o.n}× ${OBJ_SHORT[o.obj]} (${FIL_SHORT[o.fil]})`);
-  state.stats.ordersDone++; state.today.orders++;
+  earn(o.reward, `Auftrag: ${orderName(o)}`);
+  state.stats.ordersDone++; state.stats.ordersByTier[orderTier(o)].done++; state.today.orders++;
   fx(105, 180, 'Auftrag +' + eur(o.reward), '#7ee08f'); sfx.goal();
   reserveAll();
+}
+function printForOrder(p) { // set this printer to the oldest open order's missing part; it goes back afterwards
+  for (const o of state.orders) {
+    if (state.carry === o.id) continue;
+    const taken = k => state.printers.some(q => q !== p && q.forOrder && q.forOrder.id === o.id && q.forOrder.part === k);
+    let i = o.parts.findIndex((q, k) => partGot(o, k) < q.n && partTier(q) <= p.tier && !taken(k)); // a part nobody prints yet
+    if (i < 0) i = o.parts.findIndex((q, k) => partGot(o, k) < q.n && partTier(q) <= p.tier);
+    if (i < 0) continue;
+    const q = o.parts[i];
+    if (!p.forOrder) p.prevJob = { job: p.job, fil: p.fil };
+    p.forOrder = { id: o.id, part: i }; p.job = q.obj; p.fil = q.fil; state.started = true;
+    fxAt(p, `Für Auftrag: ${OBJ_SHORT[q.obj]} (${FIL_SHORT[q.fil]})`, '#ffd98a'); sfx.click();
+    if (!p.auto) p.auto = true;
+    if (p.status === 'idle' || p.status === 'wait') tryStart(p);
+    return;
+  }
+  fxAt(p, 'Kein offener Auftrag für diesen Drucker', '#f3b25b'); sfx.bad();
+}
+function checkForOrder(p) { // the order part is done or gone: back to the job from before
+  if (!p.forOrder) return;
+  const o = state.orders.find(q => q.id === p.forOrder.id);
+  if (o && state.carry !== o.id && partGot(o, p.forOrder.part) < o.parts[p.forOrder.part].n) return;
+  p.forOrder = null;
+  if (p.prevJob) { p.job = p.prevJob.job; p.fil = p.prevJob.fil; p.prevJob = null; fxAt(p, `Zurück zu: ${OBJ_SHORT[p.job]}`, '#cfe9d4'); }
 }
 function updateOrders() {
   for (const o of state.orders.slice()) {
     if (state.t < o.deadline) continue;
     const pen = Math.round(o.reward * tune.order_penalty);
-    state.money -= pen; state.today.out.Strafen += pen; ledger(`Frist verpasst: ${o.n}× ${OBJ_SHORT[o.obj]}`, -pen);
-    state.stats.ordersMissed++;
+    state.money -= pen; state.today.out.Strafen += pen; ledger(`Frist verpasst: ${orderName(o)}`, -pen);
+    state.stats.ordersMissed++; state.stats.ordersByTier[orderTier(o)].missed++;
     state.orders = state.orders.filter(q => q !== o);
     if (state.carry === o.id) { // what was carried goes back on the shelf
       state.carry = null;
-      for (let i = 0; i < o.n; i++) state.store.push({ id: o.obj, fil: o.fil, c: FIL_COLOR[o.fil], v: objDef(o.obj).price * filDef(o.fil).value });
+      for (const q of o.parts) for (let i = 0; i < q.n; i++) state.store.push({ id: q.obj, fil: q.fil, c: FIL_COLOR[q.fil], v: objDef(q.obj).price * filDef(q.fil).value });
     }
-    for (const it of state.store) if (it.res === o.id) it.res = null;
-    fx(709, 200, `Frist verpasst: −${eur(pen)}`, '#ff6b6b'); sfx.bad();
+    for (const it of state.store) if (it.res === o.id) { it.res = null; it.part = undefined; }
+    fx(709, 300, `Frist verpasst: −${eur(pen)}`, '#ff6b6b'); sfx.bad();
   }
   reserveAll();
+  for (const p of state.printers) checkForOrder(p);
 }
 function updateLogistics(dt) {
   if (state.packQ.length) {
@@ -486,13 +589,13 @@ function updateLogistics(dt) {
       state.truck = { st: 'dock', t: 0, value: 0, n: 0 };
     }
   }
-  if (state.autoShip) {
+  if (state.autoPack) { // Packautomat: packs the shelf (order parts stay); shipping stays by hand
+    state.autoPackT += dt;
+    if (state.autoPackT >= tune.auto_ship_every) { state.autoPackT = 0; if (state.store.some(it => !it.res)) packAll(); }
+  }
+  if (state.autoShip) { // Auto-Versand: only ships what is packed
     state.autoShipT += dt;
-    if (state.autoShipT >= tune.auto_ship_every) {
-      state.autoShipT = 0;
-      if (state.store.some(it => !it.res)) packAll();
-      if (state.packed.length && state.truck.st === 'dock' && !state.packQ.length) shipAll();
-    }
+    if (state.autoShipT >= tune.auto_ship_every) { state.autoShipT = 0; if (state.packed.length && state.truck.st === 'dock' && !state.packQ.length) shipAll(); }
   }
 }
 
@@ -510,6 +613,7 @@ const MS = [
   { t: () => 'Drucke 10 Teile aus PETG', p: () => Math.min(1, state.stats.byFil.petg / 10), r: 100 },
   { t: () => 'Besitze 5 Drucker', p: () => cnt(5), r: 150 },
   { t: () => 'Liefere einen Kundenauftrag aus', p: () => state.stats.ordersDone >= 1 ? 1 : 0, r: 120 },
+  { t: () => 'Kauf den Packautomaten', p: () => state.autoPack ? 1 : afford(tune.auto_pack_price), r: 80 },
   { t: () => 'Bau den Auto-Versand', p: () => state.autoShip ? 1 : afford(tune.auto_ship_price), r: 200 },
   { t: () => 'Kauf den Bauplan „Cosplay-Helm“', p: () => state.plans.helmet ? 1 : afford(tune.obj_helmet_plan), r: 200 },
   { t: () => 'Stell einen Industrie-Drucker auf', p: () => maxTier() >= 2 ? 1 : afford(tune.pr_ind_upgrade), r: 400 },
@@ -532,7 +636,7 @@ function checkGoals() {
   if (b.p() >= 1) { celebrate(b.t(), b.r); state.big++; }
 }
 function celebrate(label, reward) {
-  state.money += reward; state.today.inc += reward; ledger('Ziel: ' + label, reward);
+  state.today.inc += reward; ledger('Ziel: ' + label, reward); payIn(reward);
   state.banner = { s: `Ziel geschafft: ${label}  +${eur(reward)}`, t: 0, c: '#2f9e55' };
   for (let i = 0; i < 50; i++) state.confetti.push({ x: 1050 + (rng() - 0.5) * 380, y: 600, vx: (rng() - 0.5) * 260, vy: -120 - rng() * 260, c: ['#ffd166', '#7ee08f', '#5ab0ff', '#ff7b9c'][i % 4], t: 0, r: rng() * 6 });
   sfx.goal();
@@ -540,6 +644,8 @@ function celebrate(label, reward) {
 
 // ---- Simulation -------------------------------------------------------------------------------
 function afterPrint(p) {
+  checkForOrder(p);
+  if (runQueuedUpgrade(p)) return;
   if (p.maintQueued) { p.maintQueued = false; if (startMaint(p, false)) return; }
   p.status = 'idle';
   if (p.auto) tryStart(p);
@@ -588,19 +694,22 @@ function updatePrinter(p, dt) {
     if (p.prog >= 1) finishPrint(p);
   } else if (p.status === 'maint') {
     p.timer += dt;
-    if (p.timer >= tune.maint_time) { p.wear = 0; p.status = 'idle'; p.robotMaint = false; sfx.fixed(); if (p.auto) tryStart(p); }
+    if (p.timer >= tune.maint_time) { p.wear = 0; p.status = 'idle'; p.robotMaint = false; sfx.fixed(); if (runQueuedUpgrade(p)) return; if (p.auto) tryStart(p); }
   } else if (p.status === 'repair') {
     p.timer += dt;
-    if (p.timer >= tune.repair_time) { p.wear = tune.repair_wear; p.status = 'idle'; sfx.fixed(); if (p.auto) tryStart(p); }
+    if (p.timer >= tune.repair_time) { p.wear = tune.repair_wear; p.status = 'idle'; sfx.fixed(); if (runQueuedUpgrade(p)) return; if (p.auto) tryStart(p); }
   } else if (p.status === 'held') {
     if (deposit(p, p.held)) { p.held = null; p.why = ''; afterPrint(p); }
   } else if (p.status === 'wait' && p.auto) {
     tryStart(p);
+  } else if (p.status === 'idle' && p.upQueued) {
+    runQueuedUpgrade(p);
   }
 }
 const busy = p => p.status === 'print' || p.status === 'maint' || p.status === 'repair';
 function canAct() {
   if (state.store.length || state.packQ.length || state.packed.length || state.truck.st === 'away' || state.carry) return true;
+  if (Object.values(state.spools).some(g => g > 0)) return true;
   const cheapest = Math.min(...FIL.filter(f => FIL_TIER[f] <= maxTier()).map(f => filDef(f).price));
   for (const p of state.printers) {
     if (p.status === 'held') return true;
@@ -615,12 +724,16 @@ function endDay() {
   state.money -= rent; ledger(`Miete + Strom Tag ${state.day}`, -rent);
   const out = Object.values(state.today.out).reduce((a, b) => a + b, 0) + rent;
   state.summary = { day: state.day, inc: state.today.inc, out: Object.assign({}, state.today.out), rent, total: out,
-    profit: state.today.inc - out, prints: state.today.prints, fails: state.today.fails, clogs: state.today.clogs, shipped: state.today.shipped, warn: false };
+    profit: state.today.inc - out, prints: state.today.prints, fails: state.today.fails, clogs: state.today.clogs, shipped: state.today.shipped, orders: state.today.orders, warn: false };
   state.stats.bestDay = Math.max(state.stats.bestDay, state.today.inc);
-  if (state.money < 0) {
-    if (state.warn) { gameOver('Zwei Tage hintereinander im Minus: die Bank macht die Werkstatt zu.'); return; }
-    state.warn = true; state.summary.warn = true;
-  } else state.warn = false;
+  // the credit: interest on what is owed, then a new credit for whatever the cash is short
+  const interest = state.debt > 0 ? Math.round(state.debt * tune.debt_interest) : 0;
+  if (interest) { state.debt += interest; state.stats.interest += interest; ledger(`Zinsen ${Math.round(tune.debt_interest * 100)} %`, 0); }
+  let borrow = 0;
+  if (state.money < 0) { borrow = -state.money; state.debt += borrow; state.money = 0; state.stats.borrowed += borrow; ledger('Bankkredit', borrow); }
+  if (state.debt > 0) state.stats.creditDays++;
+  Object.assign(state.summary, { interest, borrow, debt: state.debt });
+  state.warn = false;
   state.day++; state.dayT = 0; state.today = freshToday();
   state.offers = []; fillOffers();
   save(); scene = 'summary';
@@ -628,7 +741,7 @@ function endDay() {
 function gameOver(reason) {
   state.overReason = reason;
   state.gained = `Tag ${state.day} erreicht · ${eur(state.stats.earned)} verdient · ${state.printers.length} Drucker`;
-  clearSave(); sfx.clog(); scene = 'over';
+  sfx.clog(); scene = 'over'; // not used since v5: the bank credit replaces bankruptcy
 }
 
 // ---- PLAYER (client side in Roblox: the character and its prompts) --------------------------------
@@ -638,6 +751,58 @@ function blocked(x, y) {
   for (const f of FOOT) if (x > f[0] - r && x < f[2] + r && y > f[1] - r / 2 && y < f[3] + r / 2) return true;
   return false;
 }
+// click-to-walk path: breadth-first search on a grid around the benches and tables, then straightened
+let GRID = null;
+function grid() {
+  const c = tune.path_grid;
+  if (GRID && GRID.c === c) return GRID;
+  const gw = Math.floor((BOUNDS[2] - BOUNDS[0]) / c) + 1, gh = Math.floor((BOUNDS[3] - BOUNDS[1]) / c) + 1, free = new Uint8Array(gw * gh);
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) free[y * gw + x] = blocked(BOUNDS[0] + x * c, BOUNDS[1] + y * c) ? 0 : 1;
+  return (GRID = { c, gw, gh, free });
+}
+function lineFree(ax, ay, bx, by) {
+  const d = Math.hypot(bx - ax, by - ay), n = Math.ceil(d / 4);
+  for (let i = 1; i <= n; i++) if (blocked(ax + (bx - ax) * i / n, ay + (by - ay) * i / n)) return false;
+  return true;
+}
+function findPath(sx, sy, tx, ty) {
+  const g = grid(), c = g.c;
+  const cell = (x, y) => [clamp(Math.round((x - BOUNDS[0]) / c), 0, g.gw - 1), clamp(Math.round((y - BOUNDS[1]) / c), 0, g.gh - 1)];
+  const nearestFree = ([x, y]) => { // the closest walkable cell, ring by ring
+    if (g.free[y * g.gw + x]) return [x, y];
+    for (let r = 1; r < 30; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const X = x + dx, Y = y + dy;
+      if (Math.max(Math.abs(dx), Math.abs(dy)) === r && X >= 0 && Y >= 0 && X < g.gw && Y < g.gh && g.free[Y * g.gw + X]) return [X, Y];
+    }
+    return [x, y];
+  };
+  const [ax, ay] = nearestFree(cell(sx, sy)), [bx, by] = nearestFree(cell(tx, ty));
+  const prev = new Int32Array(g.gw * g.gh).fill(-1), start = ay * g.gw + ax, goal = by * g.gw + bx;
+  const q = [start]; prev[start] = start;
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+  for (let h = 0; h < q.length && prev[goal] < 0; h++) {
+    const i = q[h], x = i % g.gw, y = (i / g.gw) | 0;
+    for (const [dx, dy] of dirs) {
+      const X = x + dx, Y = y + dy, j = Y * g.gw + X;
+      if (X < 0 || Y < 0 || X >= g.gw || Y >= g.gh || prev[j] >= 0 || !g.free[j]) continue;
+      if (dx && dy && (!g.free[y * g.gw + X] || !g.free[Y * g.gw + x])) continue; // no corner cutting
+      prev[j] = i; q.push(j);
+    }
+  }
+  if (prev[goal] < 0) return [{ x: tx, y: ty }];
+  const pts = [];
+  for (let i = goal; i !== start; i = prev[i]) pts.push({ x: BOUNDS[0] + (i % g.gw) * c, y: BOUNDS[1] + ((i / g.gw) | 0) * c });
+  pts.reverse();
+  if (!blocked(tx, ty)) pts.push({ x: tx, y: ty });
+  const out = []; let cx = sx, cy = sy;
+  for (let i = 0; i < pts.length; i++) { // keep only the corners: skip points the straight line can reach
+    let j = i;
+    while (j + 1 < pts.length && lineFree(cx, cy, pts[j + 1].x, pts[j + 1].y)) j++;
+    out.push(pts[j]); cx = pts[j].x; cy = pts[j].y; i = j;
+  }
+  return out;
+}
+function walkTo(x, y) { const pl = state.player; pl.path = findPath(pl.x, pl.y, x, y); pl.to = null; }
 function movePlayer(dt) {
   const pl = state.player;
   let dx = 0, dy = 0;
@@ -647,7 +812,9 @@ function movePlayer(dt) {
   if (held('KeyS') || held('ArrowDown')) dy++;
   let k = 1;
   if (!dx && !dy && Math.hypot(joy.dx, joy.dy) > 0.15) { dx = joy.dx; dy = joy.dy; k = Math.min(1, Math.hypot(dx, dy)); }
-  if (dx || dy) pl.to = null;
+  if (dx || dy) { pl.to = null; pl.path = null; }
+  if (!dx && !dy && !pl.to && pl.path && pl.path.length) pl.to = pl.path.shift();
+  if (dx || dy) { /* keys and stick win */ }
   else if (pl.to) {
     const vx = pl.to.x - pl.x, vy = pl.to.y - pl.y, d = Math.hypot(vx, vy);
     if (d < 4) pl.to = null; else { dx = vx / d; dy = vy / d; }
@@ -660,7 +827,7 @@ function movePlayer(dt) {
   let movedAny = false;
   if (!blocked(nx, pl.y)) { pl.x = nx; movedAny = true; }
   if (!blocked(pl.x, ny)) { pl.y = ny; movedAny = true; }
-  if (!movedAny && pl.to) pl.to = null;
+  if (!movedAny && pl.to) { pl.to = null; pl.path = null; }
   if (dx) pl.dir = dx > 0 ? 1 : -1;
   pl.walk += dt * 10;
 }
@@ -685,26 +852,34 @@ function prompts() {
       ['F', `${f.name} +${tune.pack_grams} g (${eur(f.price)})`, () => refill(p), state.money >= f.price]];
     if (p.status === 'clog') out.push(['R', `Reparieren (${eur(td.repair)})`, () => doRepair(p), state.money >= td.repair]);
     else out.push(['R', p.maintQueued ? 'Wartung geplant' : `Wartung (${eur(td.maint)})`, () => doMaint(p), state.money >= td.maint && p.status !== 'maint' && p.status !== 'repair']);
+    const open = state.orders.some(o => state.carry !== o.id && o.parts.some((q, k) => partGot(o, k) < q.n && partTier(q) <= p.tier));
+    if (p.forOrder) out.push(['G', 'Druckt für Auftrag', () => printForOrder(p), true]);
+    else if (open) out.push(['G', 'Für Auftrag drucken', () => printForOrder(p), true]);
+    if (p.tier < 2) out.push(['U', p.upQueued ? 'Upgrade vorgemerkt' : `Auf ${TIER_NAME[p.tier + 1]} (${eur(td.upgrade)})`, () => doUpgrade(p), p.upQueued || state.money >= td.upgrade]);
     return out;
   }
   if (n.kind === 'slot') return state.printers.length < 8 ? [['E', `Drucker kaufen (${eur(nextPrice())})`, () => buyPrinter(n.slot), state.money >= nextPrice()]] : [];
   const free = state.store.filter(it => !it.res).length;
-  if (n.kind === 'pack') return [['E', `Alles verpacken (${free} Teile)`, packAll, free > 0]];
+  if (n.kind === 'pack') {
+    const o = [['E', `Alles verpacken (${free} Teile)`, packAll, free > 0]];
+    if (!state.autoPack) o.push(['F', `Packautomat (${eur(tune.auto_pack_price)})`, buyAutoPack, state.money >= tune.auto_pack_price]);
+    return o;
+  }
   if (n.kind === 'ship') {
     if (state.carry) { const o = state.orders.find(q => q.id === state.carry); return [['E', `Auftrag ausliefern (${o ? eur(o.reward) : ''})`, deliverOrder, true]]; }
     const o = [['E', state.truck.st === 'dock' ? `Alles verschicken (${state.packed.length} Pakete)` : 'Lieferwagen unterwegs', shipAll, state.truck.st === 'dock' && state.packed.length > 0]];
-    if (!state.autoShip) o.push(['F', `Auto-Versand (${eur(tune.auto_ship_price)})`, buyAutoShip, state.money >= tune.auto_ship_price]);
+    if (!state.autoShip) o.push(['F', state.autoPack ? `Auto-Versand (${eur(tune.auto_ship_price)})` : 'Auto-Versand (erst Packautomat)', buyAutoShip, state.autoPack && state.money >= tune.auto_ship_price]);
     return o;
   }
   if (n.kind === 'store') {
     const o = [['E', `Regal erweitern (${eur(storeUpPrice())})`, upgradeStore, state.money >= storeUpPrice()]];
     const rd = state.orders.find(orderReady);
-    if (rd && !state.carry) o.unshift(['F', `Auftrag mitnehmen (${rd.n}× ${OBJ_SHORT[rd.obj]})`, takeOrder, true]);
+    if (rd && !state.carry) o.unshift(['F', `Auftrag mitnehmen (${orderName(rd)})`, takeOrder, true]);
     return o;
   }
   if (n.kind === 'board') {
     const full = state.orders.length >= tune.order_max_active;
-    return state.offers.slice(0, 3).map((of, i) => [['E', 'F', 'R'][i], `${of.n}× ${OBJ_SHORT[of.obj]} ${FIL_SHORT[of.fil]}: ${eur(of.reward)}`, () => acceptOffer(i), !full]);
+    return state.offers.slice(0, 3).map((of, i) => [['E', 'F', 'R'][i], `${KIND_NAME[of.kind] ? KIND_NAME[of.kind] + ': ' : ''}${orderName(of)} · ${eur(of.reward)} · ${Math.round(orderTime(of))} s`, () => acceptOffer(i), !full]);
   }
   return [];
 }
@@ -720,9 +895,9 @@ function hintNow() {
   if (state.stats.shipped === 0 && state.packed.length > 0) return { s: 'Pakete fertig. Lauf zum Versandtor (oben links) und drück E: alles verschicken', id: 'ship', at: 'ship' };
   if (state.carry) return { s: 'Du trägst einen Auftrag: zum Versandtor, E = ausliefern', id: 'ship', at: 'ship' };
   const ready = state.orders.find(orderReady);
-  if (ready) return { s: `Auftrag ${ready.n}× ${OBJ_SHORT[ready.obj]} ist komplett: im Lager-Regal F = mitnehmen`, id: 'store', at: 'store' };
+  if (ready) return { s: `Auftrag ${orderName(ready)} ist komplett: im Lager-Regal F = mitnehmen`, id: 'store', at: 'store' };
   const late = state.orders.find(o => o.deadline - state.t < 30);
-  if (late) return { s: `Frist läuft ab: ${late.n}× ${OBJ_SHORT[late.obj]} (${FIL_SHORT[late.fil]}) noch ${Math.ceil(late.deadline - state.t)} s`, id: 'late', warn: true };
+  if (late) return { s: `Frist läuft ab: ${orderName(late)} noch ${Math.ceil(late.deadline - state.t)} s`, id: 'late', warn: true };
   const empty = P.find(p => p.status === 'wait' && p.why === 'Spule leer');
   if (empty && state.stats.refills < 2) return { s: `Spule von Drucker #${empty.slot + 1} ist leer: hinlaufen, F = Filament nachfüllen`, id: 'refill', at: 'p' + empty.slot };
   const clogged = P.find(p => p.status === 'clog');
@@ -730,7 +905,7 @@ function hintNow() {
   const worn = P.find(p => p.wear >= tune.wear_warn - 5 && p.status !== 'clog' && !p.autoMaint);
   if (worn && state.stats.maint === 0) return { s: `Drucker #${worn.slot + 1} verschleißt: hinlaufen, R = Wartung, bevor er verstopft`, id: 'maint', at: 'p' + worn.slot };
   if (P.length === 1 && state.money >= nextPrice()) return { s: 'Genug Geld: lauf zu einem freien Platz und drück E für Drucker #2', id: 'slot', at: 'slot' };
-  if (state.warn) return { s: 'Mahnung von der Bank: beende diesen Tag im Plus, sonst ist Schluss!', id: 'warn', warn: true };
+  if (state.orders.length && state.stats.ordersDone === 0 && !P.some(p => p.forOrder)) return { s: 'Auftrag angenommen: an einem Drucker G = für den Auftrag drucken', id: 'order', at: 'p0' };
   if (state.stats.shipped >= 1 && P.length >= 2 && state.stats.ordersDone === 0 && !state.orders.length) return { s: 'Kundenaufträge am Auftragsbrett (Wand rechts): annehmen bringt ×1,6', id: 'board', at: 'board' };
   if (P.length >= 3 && state.stats.autos === 0 && state.money >= tune.auto_maint_price) return { s: 'Zu viel Rennerei? Am Drucker gibt es Wartungs-Roboter und Filament-Zuführung', id: 'auto' };
   return null;
@@ -747,7 +922,10 @@ function updatePlay(dt) {
   checkGoals();
   if (!state.printers.some(busy) && !canAct()) {
     state.stuckT += dt;
-    if (state.stuckT > tune.stuck_grace) { gameOver('Kein Filament, kein Geld für Nachschub oder Reparatur: Pleite.'); return; }
+    if (state.stuckT > tune.stuck_grace) { // no bankruptcy: the bank lends the price of one cheap pack
+      const c = filDef('cheap').price; state.debt += c; state.money += c; state.stats.borrowed += c; state.stuckT = 0;
+      ledger('Notkredit', c); state.banner = { s: `Notkredit: ${eur(c)} für Filament. Schulden: ${eur(state.debt)}`, t: 0, c: '#b3262c' };
+    }
   } else state.stuckT = 0;
   for (const f of state.fx) { f.t += dt; f.y -= 30 * dt; }
   state.fx = state.fx.filter(f => f.t < f.life);
@@ -806,12 +984,12 @@ function handleClicks() {
 function floorClick(w) { // tap to walk, like Roblox click-to-move; a click on a station walks to its prompt
   for (let i = 0; i < 8; i++) {
     const s = slotPos(i);
-    if (w.x >= s.x0 - 4 && w.x <= s.x0 + BW + BS + 4 && w.y >= s.ty - 170 && w.y <= s.ty + 30) { state.player.to = { x: s.px, y: s.py + 4 }; return; }
+    if (w.x >= s.x0 - 4 && w.x <= s.x0 + BW + BS + 4 && w.y >= s.ty - 170 && w.y <= s.ty + 30) { walkTo(s.px, s.py + 4); return; }
   }
-  if (w.x < 200 && w.y < 250) { state.player.to = { x: STATION.ship.px, y: STATION.ship.py + 6 }; return; }
-  if (w.x > 600 && w.y < 250) { state.player.to = { x: STATION.board.px, y: STATION.board.py + 6 }; return; }
-  for (const k of ['pack', 'store']) { const f = STATION[k].foot; if (w.x >= f[0] && w.x <= f[2] && w.y >= f[1] - 120 && w.y <= f[3]) { state.player.to = { x: STATION[k].px, y: STATION[k].py }; return; } }
-  state.player.to = { x: clamp(w.x, BOUNDS[0], BOUNDS[2]), y: clamp(w.y, BOUNDS[1], BOUNDS[3]) };
+  if (w.x < 200 && w.y < 250) { walkTo(STATION.ship.px, STATION.ship.py + 6); return; }
+  if (w.x > 600 && w.y < 250) { walkTo(STATION.board.px, STATION.board.py + 6); return; }
+  for (const k of ['pack', 'store']) { const f = STATION[k].foot; if (w.x >= f[0] && w.x <= f[2] && w.y >= f[1] - 120 && w.y <= f[3]) { walkTo(STATION[k].px, STATION[k].py); return; } }
+  walkTo(clamp(w.x, BOUNDS[0], BOUNDS[2]), clamp(w.y, BOUNDS[1], BOUNDS[3]));
 }
 
 // ---- Drawing: figures -------------------------------------------------------------------------
@@ -1080,12 +1258,14 @@ function drawWall() {
   fillRR(604, 98, 210, 136, 5, '#8a5f33'); rect(610, 104, 198, 124, '#c9985c');
   for (let yy = 110; yy < 224; yy += 9) for (let xx = 614 + (yy % 2) * 4; xx < 806; xx += 11) rect(xx, yy, 2, 2, '#b07f48');
   state.offers.slice(0, 3).forEach((of, i) => {
-    const x = 616 + i * 65, y = 110;
-    rect(x + 2, y + 2, 58, 108, 'rgba(0,0,0,0.18)'); rect(x, y, 58, 108, '#f7f1e1'); rect(x, y, 58, 6, FIL_COLOR[of.fil]);
+    const x = 616 + i * 65, y = 110, fil = of.parts[0].fil;
+    rect(x + 2, y + 2, 58, 108, 'rgba(0,0,0,0.18)'); rect(x, y, 58, 108, of.kind === 'rush' ? '#ffe3dc' : of.kind === 'mixed' ? '#e6f0ff' : '#f7f1e1'); rect(x, y, 58, 6, FIL_COLOR[fil]);
     ell(x + 29, y + 4, 3.5, 3.5, '#e5484d');
-    drawObj(of.obj, x + 29, y + 50, 0.85, 1, FIL_COLOR[of.fil]);
-    text(`${of.n}×`, x + 29, y + 64, 14, '#2a1d10', 'center', 'bold');
-    text(FIL_SHORT[of.fil], x + 29, y + 80, 11, '#5b4630', 'center', 'bold');
+    if (of.parts.length > 1) { drawObj(of.parts[0].obj, x + 16, y + 46, 0.6, 1, FIL_COLOR[fil]); drawObj(of.parts[1].obj, x + 42, y + 46, 0.6, 1, FIL_COLOR[fil]); }
+    else drawObj(of.parts[0].obj, x + 29, y + 46, 0.8, 1, FIL_COLOR[fil]);
+    if (of.kind !== 'normal') text(KIND_NAME[of.kind], x + 29, y + 16, 9, of.kind === 'rush' ? '#c0392b' : '#2d6cad', 'center', 'bold');
+    text(of.parts.map(q => q.n + '×').join('+'), x + 29, y + 62, 13, '#2a1d10', 'center', 'bold');
+    text(`${FIL_SHORT[fil]} · ${Math.round(orderTime(of))} s`, x + 29, y + 79, 10, '#5b4630', 'center', 'bold');
     text(eur(of.reward), x + 29, y + 96, 12, '#2f6b3a', 'center', 'bold');
   });
   rect(0, 238, 830, 8, '#8d6a45');
@@ -1215,9 +1395,37 @@ function drawWorld() {
     const w = Math.max(...pr.map(q => ctx.measureText(q[1]).width)) + 40, h2 = pr.length * 22 + 8;
     let x = pl.x + 20, y = pl.y - 40 - h2 / 2;
     if (x + w > 826) x = pl.x - 20 - w;
+    if (state.near && state.near.kind === 'board') { x = clamp(pl.x - w / 2, 4, 826 - w); y = pl.y + 14; } // under the slips, never over them
     y = clamp(y, 96, 712 - h2);
     fillRR(x, y, w, h2, 7, 'rgba(18,21,26,0.88)');
     pr.forEach((q, i) => { keyChip(x + 6, y + 15 + i * 22, q[0], !q[3]); text(q[1], x + 30, y + 15 + i * 22, 12, q[3] ? '#f1f4f7' : '#9aa5b1', 'left', 'bold'); });
+  }
+}
+function problems() { // what needs the player and where; arrows point at them when they are off screen
+  const out = [];
+  for (const p of state.printers) if (p.status === 'clog') { const s = slotPos(p.slot); out.push({ x: s.bx, y: s.by - 80, s: `#${p.slot + 1} verstopft`, c: '#e5484d' }); }
+  if (state.store.length >= storeCap()) out.push({ x: 102, y: 560, s: 'Lager voll', c: '#e07a1f' });
+  if (state.orders.some(orderReady)) out.push({ x: 102, y: 560, s: 'Auftrag fertig', c: '#2f9e55' });
+  for (const o of state.orders) {
+    const left = o.deadline - state.t;
+    if (left < 30) out.push(state.carry === o.id ? { x: 106, y: 200, s: `Frist ${Math.ceil(left)} s`, c: '#b3262c' } : orderReady(o) ? { x: 102, y: 560, s: `Frist ${Math.ceil(left)} s`, c: '#b3262c' } : { x: 709, y: 170, s: `Frist ${Math.ceil(left)} s`, c: '#b3262c' });
+  }
+  return out;
+}
+function drawEdgeArrows() {
+  const L = FX0 + 30, T = FY0 + 46, Rr = FX0 + FW - 30, B = FY0 + FH - 40;
+  const seen = {};
+  for (const pb of problems()) {
+    const sx = (pb.x - cam.cx) * cam.zoom + FCX, sy = (pb.y - cam.cy) * cam.zoom + FCY;
+    if (sx > L && sx < Rr && sy > T && sy < B) continue; // on screen: the place shows it
+    const dx = sx - FCX, dy = sy - FCY, k = Math.min((dx > 0 ? Rr - FCX : FCX - L) / Math.abs(dx || 1e-6), (dy > 0 ? B - FCY : FCY - T) / Math.abs(dy || 1e-6));
+    let ex = FCX + dx * k, ey = FCY + dy * k;
+    const key = Math.round(ex / 40) + ',' + Math.round(ey / 40); ey += (seen[key] = (seen[key] || 0) + 1) * 26 - 26;
+    const a = Math.atan2(dy, dx);
+    ctx.save(); ctx.translate(ex, ey); ctx.rotate(a); poly([[16, 0], [-6, -11], [-6, 11]], pb.c); ctx.restore();
+    ctx.font = `bold 12px ${FONT}`; const w = ctx.measureText(pb.s).width + 12;
+    const tx = clamp(ex - Math.cos(a) * (w / 2 + 14), L - 20 + w / 2, Rr + 20 - w / 2), ty = ey - Math.sin(a) * 18;
+    fillRR(tx - w / 2, ty - 10, w, 20, 6, pb.c); text(pb.s, tx, ty, 12, '#fff', 'center', 'bold');
   }
 }
 function drawFloorView() {
@@ -1225,6 +1433,7 @@ function drawFloorView() {
   ctx.translate(FCX, FCY); ctx.scale(cam.zoom, cam.zoom); ctx.translate(-cam.cx, -cam.cy);
   drawWorld();
   ctx.restore();
+  drawEdgeArrows();
   const b = state.banner, h = hintNow();
   const show = b ? { s: b.s, c: b.c } : h ? { s: h.s, c: h.warn ? '#b3262c' : '#2a3442' } : null;
   if (show) {
@@ -1240,8 +1449,8 @@ function drawHUD() {
   text(eur(state.money), 18, 28, 28, state.money < 0 ? '#ff6b6b' : '#7ee08f', 'left', 'bold');
   text(`Tag ${state.day}`, 196, 20, 15, '#f1f4f7', 'left', 'bold');
   bar(196, 34, 130, 8, state.dayT / tune.day_length, '#f3c75b');
-  if (state.warn) text('MAHNUNG: Tag im Plus beenden!', 344, 28, 14, '#ff6b6b', 'left', 'bold');
-  else text(`Miete + Strom heute: ${eur(rentToday())}`, 344, 28, 14, '#c6cdd5', 'left');
+  text(`Miete + Strom heute: ${eur(rentToday())}`, 344, 20, 14, '#c6cdd5', 'left');
+  if (state.debt > 0) text(`Kredit: ${eur(state.debt)} (${Math.round(tune.debt_interest * 100)} % Zinsen/Tag)`, 344, 39, 13, '#ff8a8a', 'left', 'bold');
   const outT = Object.values(state.today.out).reduce((a, b) => a + b, 0);
   text(`Heute: +${eur(state.today.inc)}`, 600, 20, 13, '#7ee08f', 'left', 'bold');
   text(`ausgegeben ${eur(outT)}`, 600, 38, 13, '#ff9b9b', 'left');
@@ -1267,14 +1476,15 @@ function panelPrinter(p, hint) {
     text(`Spule: ${p.spool.g > 0 ? sd.name : 'leer'}`, 888, 122, 13, '#f1f4f7', 'left', 'bold');
     text(`${Math.round(p.spool.g)} g · reicht für ${Math.floor(p.spool.g / o.g)}× ${OBJ_SHORT[p.job]}`, 888, 141, 12, p.spool.g < o.g ? '#ffb15e' : '#9aa5b1', 'left');
     const swap = p.spool.type !== p.fil && p.spool.g > 0;
-    button(1080, 112, 186, 40, `Filament ${eur(f.price)}`, () => refill(p), { key: 'F', sub: swap ? `Wechsel: ${Math.round(p.spool.g)} g weg` : `+${tune.pack_grams} g ${f.name}`, subC: swap ? '#ffb15e' : undefined, enabled: state.money >= f.price, pulse: hint && hint.id === 'refill' });
+    button(1080, 112, 186, 40, `Filament ${eur(f.price)}`, () => refill(p), { key: 'F', sub: swap ? `Wechsel: ${Math.round(p.spool.g)} g ins Lager` : `+${tune.pack_grams} g ${f.name}`, subC: swap ? '#ffb15e' : undefined, enabled: state.money >= f.price, pulse: hint && hint.id === 'refill' });
     text(`Druckt: ${o.name} · ${eur(o.price * f.value)} · ${num(printTime(p, p.job, p.fil))} s`, 850, 172, 13, '#c6cdd5', 'left');
     text(`Roboter: ${p.autoMaint ? 'ja' : 'nein'} · Zuführung: ${p.autoFeed ? 'ja' : 'nein'}`, 850, 194, 12, p.autoMaint || p.autoFeed ? '#f2c037' : '#9aa5b1', 'left');
     button(846, 212, 420, 56, p.auto ? 'Stopp' : 'Start', () => toggleRun(p), { key: 'E', bg: p.auto ? '#7a3b3b' : '#2f8a4c', pulse: hint && hint.id === 'start' && !p.auto, size: 16, sub: p.auto ? 'druckt in Schleife' : 'Schleife aus' });
     if (p.status === 'clog') button(846, 276, 420, 56, 'Reparieren', () => doRepair(p), { key: 'R', size: 16, sub: eur(td.repair), enabled: state.money >= td.repair, bg: '#9a3036', pulse: hint && hint.id === 'repair' });
     else button(846, 276, 420, 56, p.maintQueued ? 'Wartung geplant' : 'Wartung', () => doMaint(p), { key: 'R', size: 16, sub: eur(td.maint) + (p.status === 'print' ? ' · nach dem Druck' : ''), enabled: p.status !== 'maint' && p.status !== 'repair' && p.status !== 'held' && state.money >= td.maint, active: p.maintQueued, pulse: hint && hint.id === 'maint' });
     button(846, 344, 420, 46, 'Mehr …', () => { panelMore = true; }, { sub: 'Bauplan, Filamentsorte, Upgrade, Automatisierung', pulse: hint && hint.id === 'auto' });
-    text('Tasten: Q Filamentsorte · T Auftrag · U Upgrade', 850, 410, 12, '#9aa5b1', 'left');
+    text(`Tasten: G für Auftrag drucken · Q Sorte · T Auftrag · U Upgrade${p.upQueued ? ' (vorgemerkt)' : ''}`, 850, 410, 12, p.upQueued ? '#d6b8ff' : '#9aa5b1', 'left');
+    if (p.forOrder) text(`Druckt für einen Auftrag, danach zurück zu ${OBJ_SHORT[p.prevJob ? p.prevJob.job : p.job]}`, 850, 430, 12, '#ffd98a', 'left');
     return;
   }
   text('Filamentsorte (Q)', 850, 120, 12, '#c6cdd5', 'left', 'bold');
@@ -1291,7 +1501,7 @@ function panelPrinter(p, hint) {
     button(x, y, 206, 38, d.name, () => chooseJob(p, ob), { sub, enabled: en, active: owned && p.job === ob, subC, icon: (ix, iy) => drawObj(ob, ix, iy + 11, 0.62, 1, owned ? f.color : '#6c7682') });
   });
   text('Upgrade und Automatisierung', 850, 318, 12, '#c6cdd5', 'left', 'bold');
-  if (p.tier < 2) button(846, 328, 136, 44, `Auf ${TIER_NAME[p.tier + 1]}`, () => doUpgrade(p), { key: 'U', sub: busy(p) ? 'Druck abwarten' : eur(td.upgrade), enabled: state.money >= td.upgrade && !busy(p), bg: '#6a4a9a' });
+  if (p.tier < 2) button(846, 328, 136, 44, p.upQueued ? 'Vorgemerkt' : `Auf ${TIER_NAME[p.tier + 1]}`, () => doUpgrade(p), { key: 'U', sub: p.upQueued ? 'nach dem Druck' : busy(p) ? `${eur(td.upgrade)} · vormerken` : eur(td.upgrade), enabled: p.upQueued || state.money >= td.upgrade, active: p.upQueued, bg: '#6a4a9a' });
   else button(846, 328, 136, 44, 'Höchste Stufe', () => {}, { enabled: false });
   button(988, 328, 136, 44, p.autoMaint ? 'Roboter aktiv' : 'Wartungs-Roboter', () => buyAuto(p, 'maint'), { sub: p.autoMaint ? `Wartung ×${num(tune.auto_maint_cost_mult)}` : eur(tune.auto_maint_price), enabled: p.autoMaint || state.money >= tune.auto_maint_price, active: p.autoMaint, bg: '#7a5e14', pulse: hint && hint.id === 'auto' && !p.autoMaint });
   button(1130, 328, 136, 44, p.autoFeed ? 'Zuführung aktiv' : 'Zuführung', () => buyAuto(p, 'feed'), { sub: p.autoFeed ? 'kauft selbst nach' : eur(tune.auto_feed_price), enabled: p.autoFeed || state.money >= tune.auto_feed_price, active: p.autoFeed, bg: '#7a5e14', pulse: hint && hint.id === 'auto' && !p.autoFeed });
@@ -1329,6 +1539,7 @@ function panelStation(kind, hint) {
     text(`Im Lager: ${state.store.length} Teile`, 850, 104, 15, '#f1f4f7', 'left', 'bold');
     text(`Karton: ${eur(tune.pack_cost)} pro Teil, wird von der Lieferung abgezogen · ${num(tune.pack_time, 2)} s pro Teil`, 850, 128, 12, '#9aa5b1', 'left');
     text(`In Arbeit: ${state.packQ.length} · fertig verpackt: ${state.packed.length}`, 850, 150, 13, '#c6cdd5', 'left');
+    text(state.autoPack ? `Packautomat aktiv: packt alle ${tune.auto_ship_every} s. Verschicken bleibt Handarbeit.` : 'Packautomat: packt das Regal von selbst, du verschickst nur noch.', 850, 172, 12, state.autoPack ? '#7ee08f' : '#9aa5b1', 'left');
     for (let i = 0; i < Math.min(12, state.packed.length); i++) drawBox(870 + (i % 6) * 34, 220 + Math.floor(i / 6) * 32, 1.6);
   } else if (kind === 'ship') {
     card(838, 62, 436, 404, 'Versandtor');
@@ -1336,16 +1547,16 @@ function panelStation(kind, hint) {
     text(`Pakete bereit: ${state.packed.length} · Wert ${eur(v)}`, 850, 104, 15, '#f1f4f7', 'left', 'bold');
     text(state.truck.st === 'dock' ? 'Lieferwagen steht am Tor' : `Lieferwagen unterwegs: ${state.truck.n} Pakete, ${eur(state.truck.value)}, zurück in ${Math.ceil(tune.ship_time - state.truck.t)} s`, 850, 128, 12, '#c6cdd5', 'left');
     text('Das Geld kommt, wenn der Lieferwagen zurück ist.', 850, 150, 12, '#9aa5b1', 'left');
-    text(state.autoShip ? `Auto-Versand aktiv: packt und verschickt alle ${tune.auto_ship_every} s.` : 'Auto-Versand: Förderband + Packautomat, kein Laufen mehr nötig.', 850, 172, 12, state.autoShip ? '#7ee08f' : '#9aa5b1', 'left');
+    text(state.autoShip ? `Auto-Versand aktiv: verschickt alle ${tune.auto_ship_every} s. Aufträge bleiben Handarbeit.` : state.autoPack ? 'Auto-Versand: verschickt die Pakete von selbst.' : 'Auto-Versand braucht zuerst den Packautomaten (am Packtisch).', 850, 172, 12, state.autoShip ? '#7ee08f' : '#9aa5b1', 'left');
   } else if (kind === 'board') {
     card(838, 62, 436, 404, 'Auftragsbrett');
-    text(`Lohn ×${num(tune.order_mult)} auf den Normalpreis · Frist ${Math.round(tune.order_time)} s · verpasst: −${Math.round(tune.order_penalty * 100)} %`, 850, 98, 12, '#c6cdd5', 'left');
-    text('Aufträge sind Handarbeit: der Auto-Versand verschickt sie nie.', 850, 118, 12, '#9aa5b1', 'left');
+    text(`Lohn ×${num(tune.order_mult)} (gemischt ×${num(tune.order_mixed_mult)}, eilig ×${num(tune.order_rush_mult)}) · verpasst: −${Math.round(tune.order_penalty * 100)} %`, 850, 98, 12, '#c6cdd5', 'left');
+    text('Frist = Druckzeit der Teile + Puffer. Am Drucker G = für den Auftrag drucken.', 850, 118, 12, '#9aa5b1', 'left');
     text(`Angenommen (${state.orders.length}/${tune.order_max_active})`, 850, 146, 13, '#ffd98a', 'left', 'bold');
     state.orders.forEach((o, i) => {
-      const y = 170 + i * 30, got = state.carry === o.id ? o.n : reservedFor(o), left = Math.ceil(o.deadline - state.t);
-      text(`${o.n}× ${OBJ_NAME[o.obj]} (${FIL_SHORT[o.fil]})`, 850, y, 13, '#f1f4f7', 'left', 'bold');
-      text(`${got}/${o.n} · ${left} s · ${eur(o.reward)}`, 1262, y, 12, left < 30 ? '#ff8a8a' : '#9aa5b1', 'right');
+      const y = 170 + i * 30, left = Math.ceil(o.deadline - state.t);
+      text(`${KIND_NAME[o.kind] ? KIND_NAME[o.kind] + ' ' : ''}${orderName(o)}`, 850, y, 13, '#f1f4f7', 'left', 'bold');
+      text(`${orderGot(o)}/${orderN(o)} · ${left} s · ${eur(o.reward)}`, 1262, y, 12, left < 30 ? '#ff8a8a' : '#9aa5b1', 'right');
     });
     if (!state.orders.length) text('noch keine', 850, 170, 12, '#9aa5b1', 'left');
   } else if (kind === 'store') {
@@ -1356,6 +1567,8 @@ function panelStation(kind, hint) {
     text('Ist das Regal voll, bleiben fertige Teile im Drucker und er steht still.', 850, 150, 12, '#9aa5b1', 'left');
     const res = state.store.filter(it => it.res).length;
     text(`Für Aufträge reserviert (gelb markiert): ${res} Teile`, 850, 172, 12, '#f2c037', 'left');
+    const sp = FIL.filter(f => state.spools[f] > 0).map(f => `${FIL_SHORT[f]} ${Math.round(state.spools[f])} g`).join(' · ');
+    text(`Angebrochene Spulen: ${sp || 'keine'}`, 850, 194, 12, '#c6cdd5', 'left');
   }
   pr.forEach((q, i) => button(846, 412 - (pr.length - i) * 48, 420, 42, q[1], q[2], { key: q[0], enabled: q[3], bg: '#2f8a4c', size: 14, pulse: hint && ((hint.id === 'pack' && kind === 'pack') || (hint.id === 'ship' && kind === 'ship') || (hint.id === 'slot' && kind === 'slot') || (hint.id === 'board' && kind === 'board') || (hint.id === 'store' && kind === 'store')) && i === 0 }));
 }
@@ -1372,8 +1585,8 @@ function drawPanel() {
   text(`Packtisch ${state.packQ.length ? 'packt ' + state.packQ.length : 'frei'}`, 970, 500, 13, '#f1f4f7', 'left', 'bold');
   text(`Pakete ${state.packed.length}`, 1110, 500, 13, '#f1f4f7', 'left', 'bold');
   text(state.truck.st === 'dock' ? 'Lieferwagen: am Tor' : `Lieferwagen: zurück in ${Math.ceil(tune.ship_time - state.truck.t)} s (${eur(state.truck.value)})`, 850, 524, 12, '#c6cdd5', 'left');
-  text(state.autoShip ? 'Auto-Versand: an' : 'Auto-Versand: nein', 1262, 524, 12, state.autoShip ? '#7ee08f' : '#9aa5b1', 'right');
-  const os = state.orders.map(o => `${state.carry === o.id ? o.n : reservedFor(o)}/${o.n} ${OBJ_SHORT[o.obj]} ${Math.ceil(o.deadline - state.t)} s`).join(' · ');
+  text(`Packautomat: ${state.autoPack ? 'an' : 'nein'} · Auto-Versand: ${state.autoShip ? 'an' : 'nein'}`, 1262, 524, 12, state.autoShip || state.autoPack ? '#7ee08f' : '#9aa5b1', 'right');
+  const os = state.orders.map(o => `${orderGot(o)}/${orderN(o)} ${o.parts.map(q => OBJ_SHORT[q.obj]).join('+')} ${Math.ceil(o.deadline - state.t)} s`).join(' · ');
   text(state.orders.length ? `Aufträge: ${os}` : 'Aufträge: keine (Auftragsbrett an der Wand)', 850, 544, 12, state.orders.some(o => o.deadline - state.t < 30) ? '#ff8a8a' : '#f2c037', 'left');
   // goals
   card(838, 562, 436, 152, 'Ziele');
@@ -1460,12 +1673,12 @@ const scenes = {
         'Billiges Filament = mehr Fehldrucke, gutes = mehr Wert',
         'Wartung ist billig, Verstopfung teuer',
         'Später automatisieren: Wartungs-Roboter, Zuführung, Auto-Versand',
-        'Miete am Tagesende: zweimal im Minus = Pleite'];
+        'Miete am Tagesende; fehlt Geld, gibt die Bank Kredit (10 % am Tag)'];
       lines.forEach((l, i) => text(l, 90, 396 + i * 24, 14, '#c6cdd5', 'left'));
       const s = loadSave();
       button(90, 552, 220, 50, 'Neues Spiel', () => { clearSave(); reset(); scene = 'play'; }, { bg: '#2f8a4c', size: 17, sub: 'Enter / Klick' });
       if (s) button(330, 552, 240, 50, `Weiter: Tag ${s.day}`, () => continueGame(s), { bg: '#2d6cad', size: 17, sub: eur(s.money) });
-      text('Laufen: WASD oder Pfeiltasten · E: Aktion am Drucker oder an der Station', 340, 628, 13, '#9aa5b1');
+      text('Laufen: WASD, Pfeiltasten oder Klick · E: Aktion · G: für Auftrag drucken', 340, 628, 13, '#9aa5b1');
     },
   },
   play: {
@@ -1479,6 +1692,7 @@ const scenes = {
       if (pressed('KeyQ') && p) cycleFil(p);
       if (pressed('KeyT') && p) cycleJob(p);
       if (pressed('KeyU') && p) doUpgrade(p);
+      if (pressed('KeyG') && p) printForOrder(p);
       updatePlay(dt);
     },
     draw: drawPlay,
@@ -1503,9 +1717,10 @@ const scenes = {
       text('Gewinn heute', 400, y + 4, 17, '#fff', 'left', 'bold'); text((s.profit >= 0 ? '+' : '') + eur(s.profit), 880, y + 4, 17, s.profit >= 0 ? '#7ee08f' : '#ff6b6b', 'right', 'bold');
       y += 34;
       text(`Gedruckt: ${s.prints - s.fails} · Fehldrucke: ${s.fails} · Verstopfungen: ${s.clogs} · verschickt: ${s.shipped}`, 640, y, 13, '#c6cdd5'); y += 24;
-      text(`Kasse jetzt: ${eur(state.money)} · Miete morgen: ${eur(rentToday())}`, 640, y, 13, '#c6cdd5');
-      if (s.warn) text('MAHNUNG: Du bist im Minus. Beende den nächsten Tag im Plus, sonst Pleite!', 640, 548, 14, '#ff6b6b', 'center', 'bold');
-      else text('Gespeichert.', 640, 548, 13, '#9aa5b1');
+      text(`Kasse jetzt: ${eur(state.money)} · Miete morgen: ${eur(rentToday())}`, 640, y, 13, '#c6cdd5'); y += 22;
+      text(`Aufträge heute: ${state.summary && state.summary.orders || 0}`, 640, y, 13, '#c6cdd5');
+      if (s.borrow || s.interest || s.debt) text(`Bank: ${s.borrow ? 'neuer Kredit ' + eur(s.borrow) + ' · ' : ''}${s.interest ? 'Zinsen ' + eur(s.interest) + ' · ' : ''}Schulden ${eur(s.debt || 0)} (Einnahmen tilgen zuerst)`, 640, 530, 13, '#ff8a8a', 'center', 'bold');
+      text('Gespeichert.', 640, 550, 13, '#9aa5b1');
       button(540, 566, 200, 40, 'Weiter', () => { scene = 'play'; }, { bg: '#2f8a4c', size: 16 });
     },
   },
