@@ -108,13 +108,29 @@ function toLogical(e) {
   const b = canvas.getBoundingClientRect();
   return { x: (e.clientX - b.left) / b.width * W, y: (e.clientY - b.top) / b.height * H };
 }
-canvas.addEventListener('pointerdown', e => { startAudio(); const p = toLogical(e); clicks.push(p); });
-canvas.addEventListener('pointermove', e => { const p = toLogical(e); mouse.x = p.x; mouse.y = p.y; mouse.in = true; });
+// touch: a joystick bottom left and a big action button bottom right (Roblox's mobile controls)
+const TOUCH = params.get('touch') === '1' || (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches) || (navigator.maxTouchPoints || 0) > 0;
+const JOY = { x: 110, y: 600 }, ACT = { x: 735, y: 610, r: 52 };
+const joy = { id: null, dx: 0, dy: 0 };
+canvas.addEventListener('pointerdown', e => {
+  startAudio(); const p = toLogical(e);
+  if (TOUCH && scene === 'play') {
+    if (Math.hypot(p.x - JOY.x, p.y - JOY.y) < tune.joy_radius * 1.4) { joy.id = e.pointerId; joyMove(p); return; }
+    if (Math.hypot(p.x - ACT.x, p.y - ACT.y) < ACT.r) { hit.add('KeyE'); return; }
+  }
+  clicks.push(p);
+});
+function joyMove(p) {
+  const dx = p.x - JOY.x, dy = p.y - JOY.y, d = Math.hypot(dx, dy), r = tune.joy_radius;
+  const k = d > r ? r / d : 1; joy.dx = dx * k / r; joy.dy = dy * k / r;
+}
+canvas.addEventListener('pointermove', e => {
+  const p = toLogical(e); mouse.x = p.x; mouse.y = p.y; mouse.in = e.pointerType === 'mouse';
+  if (e.pointerId === joy.id) joyMove(p);
+});
+const joyEnd = e => { if (e.pointerId === joy.id) { joy.id = null; joy.dx = 0; joy.dy = 0; } };
+canvas.addEventListener('pointerup', joyEnd); canvas.addEventListener('pointercancel', joyEnd);
 canvas.addEventListener('pointerleave', () => { mouse.in = false; });
-canvas.addEventListener('wheel', e => {
-  e.preventDefault(); const p = toLogical(e);
-  if (inFloor(p)) cam.zoom = clamp(cam.zoom * Math.exp(-e.deltaY * 0.0012), 1, 1.9);
-}, { passive: false });
 
 // ---- Audio --------------------------------------------------------------------------------
 let audio = null, muted = false;
@@ -156,7 +172,7 @@ const FIL_COLOR = { cheap: '#e7d3a1', plus: '#3d84f0', petg: '#1fbfa2', resin: '
 const FIL_TIER = { cheap: 0, plus: 0, petg: 1, resin: 2 };
 function filDef(id) {
   return { id, name: FIL_NAME[id], color: FIL_COLOR[id], tier: FIL_TIER[id],
-    price: tune[`fil_${id}_price`], fail: tune[`fil_${id}_fail`], value: tune[`fil_${id}_value`] };
+    price: tune[`fil_${id}_price`], fail: tune[`fil_${id}_fail`], value: tune[`fil_${id}_value`], speed: tune[`fil_${id}_speed`] };
 }
 const OBJ = ['key', 'holder', 'dragon', 'gear', 'helmet', 'drone'];
 const OBJ_NAME = { key: 'Schlüsselanhänger', holder: 'Handyhalter', dragon: 'Drachenfigur', gear: 'Zahnrad-Ersatzteil', helmet: 'Cosplay-Helm', drone: 'Drohnenrahmen' };
@@ -179,7 +195,7 @@ function tierDef(t) {
 // ---- Layout (world coordinates) -------------------------------------------------------------
 const FX0 = 0, FY0 = 56, FW = 830, FH = 664, FCX = FX0 + FW / 2, FCY = FY0 + FH / 2;
 const BW = 128, BD = 28, BS = 18, PS = 0.8; // bench width, depth, skew; printer drawing scale
-const cam = { zoom: 1, cx: FCX, cy: FCY };
+const cam = { zoom: 1, cx: FCX, cy: FCY }; // zoom is set from tune.cam_zoom; the camera follows the player
 function clampCam() {
   const hw = FW / 2 / cam.zoom, hh = FH / 2 / cam.zoom;
   cam.cx = clamp(cam.cx, FX0 + hw, FX0 + FW - hw); cam.cy = clamp(cam.cy, FY0 + hh, FY0 + FH - hh);
@@ -197,6 +213,7 @@ const STATION = {
   ship: { name: 'Versandtor', px: 105, py: 272, foot: null },
   pack: { name: 'Packtisch', px: 105, py: 478, foot: [26, 398, 178, 446] },
   store: { name: 'Lager-Regal', px: 105, py: 590, foot: [26, 612, 178, 656] },
+  board: { name: 'Auftragsbrett', px: 709, py: 272, foot: null },
 };
 const BOUNDS = [14, 252, 816, 712];
 function footprints() {
@@ -215,7 +232,7 @@ function newPrinter(slot, tier = 0) {
     auto: false, maintQueued: false, cur: null, why: '', held: null, autoMaint: false, autoFeed: false };
 }
 function freshToday() {
-  return { inc: 0, out: { Filament: 0, Wartung: 0, Reparatur: 0, Drucker: 0, Baupläne: 0, Upgrades: 0, Automatik: 0, Kartons: 0, Lager: 0 }, prints: 0, fails: 0, clogs: 0, shipped: 0 };
+  return { inc: 0, out: { Filament: 0, Wartung: 0, Reparatur: 0, Drucker: 0, Baupläne: 0, Upgrades: 0, Automatik: 0, Kartons: 0, Lager: 0, Strafen: 0 }, prints: 0, fails: 0, clogs: 0, shipped: 0, orders: 0 };
 }
 function reset() {
   seed = Number(params.get('seed')) || CONFIG.seed;
@@ -226,15 +243,17 @@ function reset() {
     money: tune.start_money, day: 1, dayT: 0, warn: false,
     printers: [p0],
     plans: { key: true, holder: false, dragon: false, gear: false, helmet: false, drone: false },
-    stats: { prints: 0, fails: 0, clogs: 0, maint: 0, repairs: 0, earned: 0, bestDay: 0, refills: 0, packed: 0, shipped: 0, autos: 0,
+    stats: { prints: 0, fails: 0, clogs: 0, maint: 0, repairs: 0, earned: 0, bestDay: 0, refills: 0, packed: 0, shipped: 0, autos: 0, robotMaint: 0, robotClogs: 0, ordersDone: 0, ordersMissed: 0, firstAutoT: -1,
       byFil: { cheap: 0, plus: 0, petg: 0, resin: 0 } },
-    today: freshToday(), ledger: [], ms: 0, big: 0, summary: null, stuckT: 0, started: false,
+    today: freshToday(), ledger: [], ms: 0, big: 0, summary: null, stuckT: 0, started: false, saveT: 0,
+    offers: [], orders: [], orderId: 0, carry: null,
     store: [], storeLvl: 0, packQ: [], packT: 0, packed: [], truck: { st: 'dock', t: 0, value: 0, n: 0 }, autoShip: false, autoShipT: 0,
     player: { x: s0.px, y: s0.py + 6, dir: 1, walk: 0, moving: false, to: null },
     near: null,
     fx: [], flying: [], confetti: [], banner: null, overReason: '',
   };
-  cam.zoom = 1; cam.cx = FCX; cam.cy = FCY;
+  fillOffers();
+  cam.zoom = tune.cam_zoom; cam.cx = state.player.x; cam.cy = state.player.y - 60; clampCam();
 }
 function save() {
   try {
@@ -247,8 +266,14 @@ function loadSave() {
 }
 function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* ignore */ } }
 function continueGame(s) {
-  reset(); Object.assign(state, s); if (s.seedNow) seed = s.seedNow;
+  reset(); const st0 = state.stats, td0 = state.today;
+  Object.assign(state, s); if (s.seedNow) seed = s.seedNow;
+  // a save from an older version lacks newer counters: keep the defaults for those
+  state.stats = Object.assign({}, st0, s.stats, { byFil: Object.assign({}, st0.byFil, s.stats && s.stats.byFil) });
+  state.today = Object.assign({}, td0, s.today, { out: Object.assign({}, td0.out, s.today && s.today.out) });
   state.fx = []; state.flying = []; state.confetti = []; state.banner = null; state.player.to = null; scene = 'play';
+  if (!state.offers || !state.offers.length) fillOffers();
+  cam.cx = state.player.x; cam.cy = state.player.y - 60; clampCam();
 }
 
 // ---- ECONOMY (server side in Roblox) ---------------------------------------------------------
@@ -287,12 +312,19 @@ function refill(p, auto = false) {
   if (p.status === 'wait' && p.auto) tryStart(p);
   return true;
 }
+// how long and how much wear one print of this job takes on this printer: the robot checks it before every start
+function printTime(p, job, fil) { return objDef(job).time / (tierDef(p.tier).speed * filDef(fil).speed); }
+function printWear(p, job, fil) { return tierDef(p.tier).wear * printTime(p, job, fil); }
 function tryStart(p) {
   const o = objDef(p.job), f = filDef(p.spool.type);
   if (!state.plans[p.job] || o.tier > p.tier) { p.status = 'wait'; p.why = 'Auftrag passt nicht'; return false; }
   if (p.spool.g < o.g && p.autoFeed && state.money >= filDef(p.fil).price) refill(p, true);
   if (p.spool.g < o.g) { p.status = 'wait'; p.why = 'Spule leer'; return false; }
   if (f.tier > p.tier) { p.status = 'wait'; p.why = 'Filament passt nicht'; return false; }
+  if (p.autoMaint && p.wear > 0.5 && p.wear + printWear(p, p.job, p.spool.type) > tune.auto_maint_at) {
+    if (startMaint(p, true)) return false;
+    p.status = 'wait'; p.why = 'Roboter: kein Geld'; return false;
+  }
   p.spool.g -= o.g; p.status = 'print'; p.prog = 0; p.cur = { job: p.job, fil: p.spool.type }; p.why = '';
   return true;
 }
@@ -303,16 +335,17 @@ function toggleRun(p) {
   p.auto = true; sfx.click();
   if (p.status === 'idle' || p.status === 'wait') tryStart(p);
 }
-function startMaint(p, label) {
-  if (!spend('Wartung', tierDef(p.tier).maint, label || `Wartung #${p.slot + 1}`)) return false;
-  p.status = 'maint'; p.timer = 0; state.stats.maint++; return true;
+function maintCost(p, robot) { return tierDef(p.tier).maint * (robot ? tune.auto_maint_cost_mult : 1); }
+function startMaint(p, robot = false) {
+  if (!spend('Wartung', maintCost(p, robot), `${robot ? 'Roboter-Wartung' : 'Wartung'} #${p.slot + 1}`)) return false;
+  p.status = 'maint'; p.timer = 0; p.robotMaint = robot; state.stats.maint++; if (robot) state.stats.robotMaint++; return true;
 }
 function doMaint(p) {
   if (!p) return;
   if (p.status === 'clog') { doRepair(p); return; }
   if (p.status === 'maint' || p.status === 'repair' || p.status === 'held') return;
-  if (p.status === 'print') { if (state.money >= tierDef(p.tier).maint) { p.maintQueued = !p.maintQueued; sfx.click(); } else sfx.bad(); return; }
-  if (startMaint(p)) sfx.click();
+  if (p.status === 'print') { if (state.money >= maintCost(p, false)) { p.maintQueued = !p.maintQueued; sfx.click(); } else sfx.bad(); return; }
+  if (startMaint(p, false)) sfx.click();
 }
 function doRepair(p) {
   if (!p || p.status !== 'clog') return;
@@ -328,8 +361,8 @@ function doUpgrade(p) {
 }
 function buyAuto(p, kind) {
   if (!p) return;
-  if (kind === 'maint' && !p.autoMaint) { if (spend('Automatik', tune.auto_maint_price, `Wartungs-Roboter #${p.slot + 1}`)) { p.autoMaint = true; state.stats.autos++; sfx.buy(); fxAt(p, 'Wartungs-Roboter!', '#ffd166'); } }
-  if (kind === 'feed' && !p.autoFeed) { if (spend('Automatik', tune.auto_feed_price, `Filament-Zuführung #${p.slot + 1}`)) { p.autoFeed = true; state.stats.autos++; sfx.buy(); fxAt(p, 'Filament-Zuführung!', '#ffd166'); if (p.status === 'wait' && p.auto) tryStart(p); } }
+  if (kind === 'maint' && !p.autoMaint) { if (spend('Automatik', tune.auto_maint_price, `Wartungs-Roboter #${p.slot + 1}`)) { p.autoMaint = true; state.stats.autos++; if (state.stats.firstAutoT < 0) state.stats.firstAutoT = state.t; sfx.buy(); fxAt(p, 'Wartungs-Roboter!', '#ffd166'); } }
+  if (kind === 'feed' && !p.autoFeed) { if (spend('Automatik', tune.auto_feed_price, `Filament-Zuführung #${p.slot + 1}`)) { p.autoFeed = true; state.stats.autos++; if (state.stats.firstAutoT < 0) state.stats.firstAutoT = state.t; sfx.buy(); fxAt(p, 'Filament-Zuführung!', '#ffd166'); if (p.status === 'wait' && p.auto) tryStart(p); } }
 }
 function buyPrinter(slot) {
   if (state.printers.length >= 8 || printerAt(slot)) return;
@@ -358,9 +391,10 @@ function cycleFil(p) { const ok = FIL.filter(f => FIL_TIER[f] <= p.tier); p.fil 
 
 // ---- STORAGE AND SHIPPING (server side in Roblox) -------------------------------------------------
 function packAll() { // cartons are paid out of the delivery, so packing never needs cash on hand
-  const n = state.store.length;
-  if (!n) { sfx.bad(); return; }
-  state.packQ.push(...state.store.splice(0, n)); sfx.click();
+  const free = state.store.filter(it => !it.res);
+  if (!free.length) { sfx.bad(); return; }
+  state.store = state.store.filter(it => it.res);
+  state.packQ.push(...free); sfx.click();
 }
 function shipAll() {
   if (state.truck.st !== 'dock' || !state.packed.length) { sfx.bad(); return; }
@@ -375,6 +409,65 @@ function upgradeStore() {
 function buyAutoShip() {
   if (state.autoShip) return;
   if (spend('Automatik', tune.auto_ship_price, 'Auto-Versand (Förderband)')) { state.autoShip = true; state.stats.autos++; sfx.buy(); fx(105, 200, 'Auto-Versand!', '#ffd166'); }
+}
+// ---- CUSTOMER ORDERS (server side in Roblox; the board is a SurfaceGui with prompts) ----------------
+function makeOffer() {
+  const mt = maxTier();
+  const objs = OBJ.filter(o => state.plans[o] && OBJ_TIER[o] <= mt), fils = FIL.filter(f => FIL_TIER[f] <= mt);
+  const pick = a => a[Math.min(a.length - 1, Math.floor(Math.sqrt(rng()) * a.length))]; // leans to the newest unlock
+  const obj = pick(objs), fil = pick(fils);
+  const n = tune.order_n_base + tune.order_n_per_tier * mt + Math.floor(rng() * (tune.order_n_spread + 1));
+  return { id: ++state.orderId, obj, fil, n, reward: Math.round(n * objDef(obj).price * filDef(fil).value * tune.order_mult) };
+}
+function fillOffers() { while (state.offers.length < tune.order_slots) state.offers.push(makeOffer()); }
+function acceptOffer(i) {
+  const of = state.offers[i];
+  if (!of || state.orders.length >= tune.order_max_active) { sfx.bad(); return; }
+  state.offers.splice(i, 1);
+  state.orders.push(Object.assign(of, { deadline: state.t + tune.order_time }));
+  reserveAll(); fillOffers(); sfx.buy();
+  fx(709, 200, `Angenommen: ${of.n}× ${OBJ_SHORT[of.obj]} (${FIL_SHORT[of.fil]})`, '#ffd98a');
+}
+const reservedFor = o => state.store.filter(it => it.res === o.id).length;
+const orderReady = o => state.carry !== o.id && reservedFor(o) >= o.n;
+function reserveAll() { // matching parts on the shelf are held for the orders, oldest order first
+  for (const o of state.orders) {
+    if (state.carry === o.id) continue;
+    let have = reservedFor(o);
+    for (const it of state.store) { if (have >= o.n) break; if (!it.res && it.id === o.obj && it.fil === o.fil) { it.res = o.id; have++; } }
+  }
+}
+function takeOrder() {
+  const o = state.orders.find(orderReady);
+  if (!o || state.carry) { sfx.bad(); return; }
+  state.store = state.store.filter(it => it.res !== o.id);
+  state.carry = o.id; sfx.click();
+}
+function deliverOrder() {
+  const o = state.orders.find(q => q.id === state.carry);
+  state.carry = null;
+  if (!o) return;
+  state.orders = state.orders.filter(q => q !== o);
+  earn(o.reward, `Auftrag: ${o.n}× ${OBJ_SHORT[o.obj]} (${FIL_SHORT[o.fil]})`);
+  state.stats.ordersDone++; state.today.orders++;
+  fx(105, 180, 'Auftrag +' + eur(o.reward), '#7ee08f'); sfx.goal();
+  reserveAll();
+}
+function updateOrders() {
+  for (const o of state.orders.slice()) {
+    if (state.t < o.deadline) continue;
+    const pen = Math.round(o.reward * tune.order_penalty);
+    state.money -= pen; state.today.out.Strafen += pen; ledger(`Frist verpasst: ${o.n}× ${OBJ_SHORT[o.obj]}`, -pen);
+    state.stats.ordersMissed++;
+    state.orders = state.orders.filter(q => q !== o);
+    if (state.carry === o.id) { // what was carried goes back on the shelf
+      state.carry = null;
+      for (let i = 0; i < o.n; i++) state.store.push({ id: o.obj, fil: o.fil, c: FIL_COLOR[o.fil], v: objDef(o.obj).price * filDef(o.fil).value });
+    }
+    for (const it of state.store) if (it.res === o.id) it.res = null;
+    fx(709, 200, `Frist verpasst: −${eur(pen)}`, '#ff6b6b'); sfx.bad();
+  }
+  reserveAll();
 }
 function updateLogistics(dt) {
   if (state.packQ.length) {
@@ -397,7 +490,7 @@ function updateLogistics(dt) {
     state.autoShipT += dt;
     if (state.autoShipT >= tune.auto_ship_every) {
       state.autoShipT = 0;
-      if (state.store.length) packAll();
+      if (state.store.some(it => !it.res)) packAll();
       if (state.packed.length && state.truck.st === 'dock' && !state.packQ.length) shipAll();
     }
   }
@@ -416,6 +509,7 @@ const MS = [
   { t: () => 'Rüste einen Drucker auf Pro auf', p: () => maxTier() >= 1 ? 1 : afford(tune.pr_pro_upgrade), r: 80 },
   { t: () => 'Drucke 10 Teile aus PETG', p: () => Math.min(1, state.stats.byFil.petg / 10), r: 100 },
   { t: () => 'Besitze 5 Drucker', p: () => cnt(5), r: 150 },
+  { t: () => 'Liefere einen Kundenauftrag aus', p: () => state.stats.ordersDone >= 1 ? 1 : 0, r: 120 },
   { t: () => 'Bau den Auto-Versand', p: () => state.autoShip ? 1 : afford(tune.auto_ship_price), r: 200 },
   { t: () => 'Kauf den Bauplan „Cosplay-Helm“', p: () => state.plans.helmet ? 1 : afford(tune.obj_helmet_plan), r: 200 },
   { t: () => 'Stell einen Industrie-Drucker auf', p: () => maxTier() >= 2 ? 1 : afford(tune.pr_ind_upgrade), r: 400 },
@@ -446,16 +540,13 @@ function celebrate(label, reward) {
 
 // ---- Simulation -------------------------------------------------------------------------------
 function afterPrint(p) {
-  if (p.maintQueued || (p.autoMaint && p.wear >= tune.auto_maint_at)) {
-    const robot = !p.maintQueued; p.maintQueued = false;
-    if (startMaint(p, robot ? `Roboter-Wartung #${p.slot + 1}` : undefined)) return;
-  }
+  if (p.maintQueued) { p.maintQueued = false; if (startMaint(p, false)) return; }
   p.status = 'idle';
   if (p.auto) tryStart(p);
 }
 function deposit(p, item) {
   if (state.store.length >= storeCap()) return false;
-  state.store.push(item);
+  state.store.push(item); reserveAll();
   const sp = slotPos(p.slot), n = state.store.length - 1;
   state.flying.push({ id: item.id, c: item.c, x0: sp.bx, y0: sp.by - 40, x1: rackSlot(n).x, y1: rackSlot(n).y, t: 0 });
   return true;
@@ -464,7 +555,7 @@ function finishPrint(p) {
   const o = objDef(p.cur.job), f = filDef(p.cur.fil);
   const wearFail = p.wear > tune.wear_fail_start ? (p.wear - tune.wear_fail_start) / (100 - tune.wear_fail_start) * tune.wear_fail_add : 0;
   state.today.prints++;
-  const item = { id: o.id, c: f.color, v: o.price * f.value };
+  const item = { id: o.id, fil: f.id, c: f.color, v: o.price * f.value };
   p.prog = 0; p.cur = null;
   if (rng() < f.fail + wearFail) {
     state.stats.fails++; state.today.fails++;
@@ -479,7 +570,7 @@ function finishPrint(p) {
 }
 function clog(p) {
   p.status = 'clog'; p.prog = 0; p.cur = null; p.maintQueued = false;
-  state.stats.clogs++; state.today.clogs++;
+  state.stats.clogs++; state.today.clogs++; if (p.autoMaint) state.stats.robotClogs++;
   fxAt(p, 'Verstopft!', '#ff6b6b'); ledger(`Drucker #${p.slot + 1} verstopft`, 0); sfx.clog();
   events.push({ type: 'clog', slot: p.slot });
 }
@@ -487,9 +578,8 @@ function updatePrinter(p, dt) {
   const td = tierDef(p.tier);
   if (p.status === 'print') {
     const o = objDef(p.cur.job);
-    p.prog += dt * td.speed / o.time;
+    p.prog += dt / printTime(p, p.cur.job, p.cur.fil);
     p.wear = Math.min(100, p.wear + td.wear * dt);
-    if (p.autoMaint && p.wear >= tune.auto_maint_at && state.money >= td.maint) p.maintQueued = true;
     if (p.wear >= 100) { clog(p); return; }
     if (p.wear > tune.wear_clog_start) {
       const h = tune.clog_rate * (p.wear - tune.wear_clog_start) / (100 - tune.wear_clog_start);
@@ -498,7 +588,7 @@ function updatePrinter(p, dt) {
     if (p.prog >= 1) finishPrint(p);
   } else if (p.status === 'maint') {
     p.timer += dt;
-    if (p.timer >= tune.maint_time) { p.wear = 0; p.status = 'idle'; sfx.fixed(); if (p.auto) tryStart(p); }
+    if (p.timer >= tune.maint_time) { p.wear = 0; p.status = 'idle'; p.robotMaint = false; sfx.fixed(); if (p.auto) tryStart(p); }
   } else if (p.status === 'repair') {
     p.timer += dt;
     if (p.timer >= tune.repair_time) { p.wear = tune.repair_wear; p.status = 'idle'; sfx.fixed(); if (p.auto) tryStart(p); }
@@ -506,13 +596,11 @@ function updatePrinter(p, dt) {
     if (deposit(p, p.held)) { p.held = null; p.why = ''; afterPrint(p); }
   } else if (p.status === 'wait' && p.auto) {
     tryStart(p);
-  } else if (p.status === 'idle' && p.autoMaint && p.wear >= tune.auto_maint_at) {
-    startMaint(p, `Roboter-Wartung #${p.slot + 1}`);
   }
 }
 const busy = p => p.status === 'print' || p.status === 'maint' || p.status === 'repair';
 function canAct() {
-  if (state.store.length || state.packQ.length || state.packed.length || state.truck.st === 'away') return true;
+  if (state.store.length || state.packQ.length || state.packed.length || state.truck.st === 'away' || state.carry) return true;
   const cheapest = Math.min(...FIL.filter(f => FIL_TIER[f] <= maxTier()).map(f => filDef(f).price));
   for (const p of state.printers) {
     if (p.status === 'held') return true;
@@ -534,6 +622,7 @@ function endDay() {
     state.warn = true; state.summary.warn = true;
   } else state.warn = false;
   state.day++; state.dayT = 0; state.today = freshToday();
+  state.offers = []; fillOffers();
   save(); scene = 'summary';
 }
 function gameOver(reason) {
@@ -556,6 +645,8 @@ function movePlayer(dt) {
   if (held('KeyD') || held('ArrowRight')) dx++;
   if (held('KeyW') || held('ArrowUp')) dy--;
   if (held('KeyS') || held('ArrowDown')) dy++;
+  let k = 1;
+  if (!dx && !dy && Math.hypot(joy.dx, joy.dy) > 0.15) { dx = joy.dx; dy = joy.dy; k = Math.min(1, Math.hypot(dx, dy)); }
   if (dx || dy) pl.to = null;
   else if (pl.to) {
     const vx = pl.to.x - pl.x, vy = pl.to.y - pl.y, d = Math.hypot(vx, vy);
@@ -564,7 +655,7 @@ function movePlayer(dt) {
   const len = Math.hypot(dx, dy);
   pl.moving = len > 0;
   if (!len) return;
-  const sp = tune.walk_speed * dt / len;
+  const sp = tune.walk_speed * k * dt / len;
   const nx = pl.x + dx * sp, ny = pl.y + dy * sp;
   let movedAny = false;
   if (!blocked(nx, pl.y)) { pl.x = nx; movedAny = true; }
@@ -597,13 +688,24 @@ function prompts() {
     return out;
   }
   if (n.kind === 'slot') return state.printers.length < 8 ? [['E', `Drucker kaufen (${eur(nextPrice())})`, () => buyPrinter(n.slot), state.money >= nextPrice()]] : [];
-  if (n.kind === 'pack') return [['E', `Alles verpacken (${state.store.length} Teile)`, packAll, state.store.length > 0]];
+  const free = state.store.filter(it => !it.res).length;
+  if (n.kind === 'pack') return [['E', `Alles verpacken (${free} Teile)`, packAll, free > 0]];
   if (n.kind === 'ship') {
+    if (state.carry) { const o = state.orders.find(q => q.id === state.carry); return [['E', `Auftrag ausliefern (${o ? eur(o.reward) : ''})`, deliverOrder, true]]; }
     const o = [['E', state.truck.st === 'dock' ? `Alles verschicken (${state.packed.length} Pakete)` : 'Lieferwagen unterwegs', shipAll, state.truck.st === 'dock' && state.packed.length > 0]];
     if (!state.autoShip) o.push(['F', `Auto-Versand (${eur(tune.auto_ship_price)})`, buyAutoShip, state.money >= tune.auto_ship_price]);
     return o;
   }
-  if (n.kind === 'store') return [['E', `Regal erweitern (${eur(storeUpPrice())})`, upgradeStore, state.money >= storeUpPrice()]];
+  if (n.kind === 'store') {
+    const o = [['E', `Regal erweitern (${eur(storeUpPrice())})`, upgradeStore, state.money >= storeUpPrice()]];
+    const rd = state.orders.find(orderReady);
+    if (rd && !state.carry) o.unshift(['F', `Auftrag mitnehmen (${rd.n}× ${OBJ_SHORT[rd.obj]})`, takeOrder, true]);
+    return o;
+  }
+  if (n.kind === 'board') {
+    const full = state.orders.length >= tune.order_max_active;
+    return state.offers.slice(0, 3).map((of, i) => [['E', 'F', 'R'][i], `${of.n}× ${OBJ_SHORT[of.obj]} ${FIL_SHORT[of.fil]}: ${eur(of.reward)}`, () => acceptOffer(i), !full]);
+  }
   return [];
 }
 function pressPrompt(key) {
@@ -616,6 +718,11 @@ function hintNow() {
   if (state.storeFullT > 1) return { s: 'Lager voll! Drucker stehen. Verpacken + verschicken oder Regal erweitern', id: 'pack', at: 'pack', warn: true };
   if (state.stats.packed === 0 && state.store.length > 0) return { s: 'Teile liegen im Lager. Lauf zum Packtisch (links) und drück E: alles verpacken', id: 'pack', at: 'pack' };
   if (state.stats.shipped === 0 && state.packed.length > 0) return { s: 'Pakete fertig. Lauf zum Versandtor (oben links) und drück E: alles verschicken', id: 'ship', at: 'ship' };
+  if (state.carry) return { s: 'Du trägst einen Auftrag: zum Versandtor, E = ausliefern', id: 'ship', at: 'ship' };
+  const ready = state.orders.find(orderReady);
+  if (ready) return { s: `Auftrag ${ready.n}× ${OBJ_SHORT[ready.obj]} ist komplett: im Lager-Regal F = mitnehmen`, id: 'store', at: 'store' };
+  const late = state.orders.find(o => o.deadline - state.t < 30);
+  if (late) return { s: `Frist läuft ab: ${late.n}× ${OBJ_SHORT[late.obj]} (${FIL_SHORT[late.fil]}) noch ${Math.ceil(late.deadline - state.t)} s`, id: 'late', warn: true };
   const empty = P.find(p => p.status === 'wait' && p.why === 'Spule leer');
   if (empty && state.stats.refills < 2) return { s: `Spule von Drucker #${empty.slot + 1} ist leer: hinlaufen, F = Filament nachfüllen`, id: 'refill', at: 'p' + empty.slot };
   const clogged = P.find(p => p.status === 'clog');
@@ -624,6 +731,7 @@ function hintNow() {
   if (worn && state.stats.maint === 0) return { s: `Drucker #${worn.slot + 1} verschleißt: hinlaufen, R = Wartung, bevor er verstopft`, id: 'maint', at: 'p' + worn.slot };
   if (P.length === 1 && state.money >= nextPrice()) return { s: 'Genug Geld: lauf zu einem freien Platz und drück E für Drucker #2', id: 'slot', at: 'slot' };
   if (state.warn) return { s: 'Mahnung von der Bank: beende diesen Tag im Plus, sonst ist Schluss!', id: 'warn', warn: true };
+  if (state.stats.shipped >= 1 && P.length >= 2 && state.stats.ordersDone === 0 && !state.orders.length) return { s: 'Kundenaufträge am Auftragsbrett (Wand rechts): annehmen bringt ×1,6', id: 'board', at: 'board' };
   if (P.length >= 3 && state.stats.autos === 0 && state.money >= tune.auto_maint_price) return { s: 'Zu viel Rennerei? Am Drucker gibt es Wartungs-Roboter und Filament-Zuführung', id: 'auto' };
   return null;
 }
@@ -633,6 +741,8 @@ function updatePlay(dt) {
   state.near = findNear();
   for (const p of state.printers) updatePrinter(p, dt);
   updateLogistics(dt);
+  updateOrders();
+  state.saveT += dt; if (state.saveT >= tune.save_every) { state.saveT = 0; save(); }
   state.storeFullT = state.store.length >= storeCap() && state.printers.some(p => p.status === 'held') ? (state.storeFullT || 0) + dt : 0;
   checkGoals();
   if (!state.printers.some(busy) && !canAct()) {
@@ -646,7 +756,8 @@ function updatePlay(dt) {
   for (const c of state.confetti) { c.t += dt; c.vy += 420 * dt; c.x += c.vx * dt; c.y += c.vy * dt; c.r += dt * 8; }
   state.confetti = state.confetti.filter(c => c.t < 1.8);
   if (state.banner) { state.banner.t += dt; if (state.banner.t > 3) state.banner = null; }
-  if (cam.zoom > 1.001) { cam.cx += (state.player.x - cam.cx) * Math.min(1, dt * 6); cam.cy += (state.player.y - 60 - cam.cy) * Math.min(1, dt * 6); }
+  cam.zoom = tune.cam_zoom;
+  cam.cx += (state.player.x - cam.cx) * Math.min(1, dt * 6); cam.cy += (state.player.y - 60 - cam.cy) * Math.min(1, dt * 6);
   clampCam();
   if (state.dayT >= tune.day_length) endDay();
 }
@@ -698,6 +809,7 @@ function floorClick(w) { // tap to walk, like Roblox click-to-move; a click on a
     if (w.x >= s.x0 - 4 && w.x <= s.x0 + BW + BS + 4 && w.y >= s.ty - 170 && w.y <= s.ty + 30) { state.player.to = { x: s.px, y: s.py + 4 }; return; }
   }
   if (w.x < 200 && w.y < 250) { state.player.to = { x: STATION.ship.px, y: STATION.ship.py + 6 }; return; }
+  if (w.x > 600 && w.y < 250) { state.player.to = { x: STATION.board.px, y: STATION.board.py + 6 }; return; }
   for (const k of ['pack', 'store']) { const f = STATION[k].foot; if (w.x >= f[0] && w.x <= f[2] && w.y >= f[1] - 120 && w.y <= f[3]) { state.player.to = { x: STATION[k].px, y: STATION[k].py }; return; } }
   state.player.to = { x: clamp(w.x, BOUNDS[0], BOUNDS[2]), y: clamp(w.y, BOUNDS[1], BOUNDS[3]) };
 }
@@ -963,10 +1075,19 @@ function drawWall() {
   rect(474, 82, 104, 100, '#7a5a3a'); ctx.fillStyle = gw; ctx.fillRect(480, 88, 92, 88);
   ell(500, 160, 16, 6, '#9bd18b'); ell(548, 166, 22, 7, '#8cc77a');
   rect(524, 88, 4, 88, '#7a5a3a'); rect(480, 130, 92, 4, '#7a5a3a'); rect(470, 180, 112, 6, '#8d6a45');
-  // supply shelf with boxes
-  rect(606, 140, 206, 6, '#8d6a45'); rect(606, 196, 206, 6, '#8d6a45');
-  for (let i = 0; i < 4; i++) { const bx = 616 + i * 50; rect(bx, 116, 34, 24, '#c79a5f'); rect(bx + 14, 116, 6, 24, '#e6c99a'); }
-  for (let i = 0; i < 4; i++) drawSpool(632 + i * 48, 180, 13, FIL_COLOR[FIL[i]], 0.85);
+  // order board: three paper slips, one per offer
+  fillRR(602, 70, 214, 24, 4, '#7a5a3a'); text('AUFTRAGSBRETT', 709, 82, 13, '#ffe2a8', 'center', 'bold');
+  fillRR(604, 98, 210, 136, 5, '#8a5f33'); rect(610, 104, 198, 124, '#c9985c');
+  for (let yy = 110; yy < 224; yy += 9) for (let xx = 614 + (yy % 2) * 4; xx < 806; xx += 11) rect(xx, yy, 2, 2, '#b07f48');
+  state.offers.slice(0, 3).forEach((of, i) => {
+    const x = 616 + i * 65, y = 110;
+    rect(x + 2, y + 2, 58, 108, 'rgba(0,0,0,0.18)'); rect(x, y, 58, 108, '#f7f1e1'); rect(x, y, 58, 6, FIL_COLOR[of.fil]);
+    ell(x + 29, y + 4, 3.5, 3.5, '#e5484d');
+    drawObj(of.obj, x + 29, y + 50, 0.85, 1, FIL_COLOR[of.fil]);
+    text(`${of.n}×`, x + 29, y + 64, 14, '#2a1d10', 'center', 'bold');
+    text(FIL_SHORT[of.fil], x + 29, y + 80, 11, '#5b4630', 'center', 'bold');
+    text(eur(of.reward), x + 29, y + 96, 12, '#2f6b3a', 'center', 'bold');
+  });
   rect(0, 238, 830, 8, '#8d6a45');
   rect(0, 246, 830, 474, '#ad7d4c');
   for (let r = 0, yy = 246; yy < 720; r++, yy += 28) {
@@ -1013,7 +1134,8 @@ function drawRack() {
   rect(x0, top, 6, 128, '#4e555d'); rect(x1 - 6, top, 6, 128, '#4e555d');
   for (let r = 0; r < 3; r++) { const sy = y1 - 6 - r * 40; rect(x0, sy, w, 6, '#7b848e'); rect(x0, sy + 6, w, 2, '#4e555d'); }
   rect(x0, top, w, 5, '#7b848e');
-  state.store.forEach((it, n) => { if (n < 24) { const s = rackSlot(n); drawObj(it.id, s.x + 6, s.y, 0.55, 1, it.c); } });
+  state.store.forEach((it, n) => { if (n < 24) { const s = rackSlot(n); drawObj(it.id, s.x + 6, s.y, 0.55, 1, it.c); if (it.res) rect(s.x + 1, s.y - 26, 11, 5, '#f2c037'); } });
+  if (state.orders.some(orderReady)) { const b = Math.sin(anim * 6) * 3; fillRR(x0 + 30, top - 52 + b, w - 60, 20, 5, '#2f9e55'); text('Auftrag fertig: F', (x0 + x1) / 2, top - 42 + b, 11, '#fff', 'center', 'bold'); }
   const full = state.store.length >= storeCap();
   fillRR(x0 + 22, top - 26, w - 44, 22, 5, full ? '#b3262c' : '#2a3442');
   text(`LAGER ${state.store.length}/${storeCap()}`, (x0 + x1) / 2, top - 15, 12, '#fff', 'center', 'bold');
@@ -1061,7 +1183,10 @@ function drawWorld() {
   for (let i = 0; i < 8; i++) list.push([slotPos(i).ty + 20, () => drawSlot(i)]);
   list.push([STATION.pack.foot[3], drawPackTable]);
   list.push([STATION.store.foot[3], drawRack]);
-  list.push([state.player.y, () => drawPlayer(state.player)]);
+  list.push([state.player.y, () => {
+    drawPlayer(state.player);
+    if (state.carry) { const pl = state.player; drawBox(pl.x + pl.dir * 4, pl.y - 18, 1.3); drawBox(pl.x + pl.dir * 4, pl.y - 33, 1.3); }
+  }]);
   list.sort((a, b) => a[0] - b[0]);
   for (const [, f] of list) f();
   // hint arrow over the place the hint points at
@@ -1069,6 +1194,7 @@ function drawWorld() {
   if (h && h.at && !state.banner) {
     let x, y;
     if (h.at === 'pack') { x = 105; y = 360; } else if (h.at === 'ship') { x = 106; y = 100; }
+    else if (h.at === 'store') { x = 102; y = 480; } else if (h.at === 'board') { x = 709; y = 96; }
     else if (h.at === 'slot') { const fr = [1, 2, 3, 4, 5, 6, 7].find(i => !printerAt(i)); if (fr !== undefined) { const s = slotPos(fr); x = s.bx; y = s.ty - 60; } }
     else if (h.at[0] === 'p') { const p = printerAt(+h.at.slice(1)); if (p) { const s = slotPos(p.slot); x = s.bx; y = s.by + topOf(p) - 30; } }
     if (x !== undefined) arrowDown(x, y, '#ffd166');
@@ -1119,49 +1245,58 @@ function drawHUD() {
   const outT = Object.values(state.today.out).reduce((a, b) => a + b, 0);
   text(`Heute: +${eur(state.today.inc)}`, 600, 20, 13, '#7ee08f', 'left', 'bold');
   text(`ausgegeben ${eur(outT)}`, 600, 38, 13, '#ff9b9b', 'left');
-  text('WASD / Pfeile: laufen · Klick auf den Boden: hinlaufen · Mausrad: Zoom', 1268, 20, 12, '#9aa5b1', 'right');
+  text(TOUCH ? 'Joystick: laufen · runder Knopf: Aktion · Tippen auf den Boden: hinlaufen' : 'WASD / Pfeile: laufen · Klick auf den Boden: hinlaufen', 1268, 20, 12, '#9aa5b1', 'right');
   text('E Aktion · F Filament · R Wartung · Q Filamentsorte · T Auftrag · U Upgrade · P Pause · M Ton' + (muted ? ' (aus)' : ''), 1268, 38, 12, '#9aa5b1', 'right');
 }
 function card(x, y, w, h, title) {
   fillRR(x, y, w, h, 8, '#2c323a'); text(title, x + 12, y + 14, 14, '#ffd98a', 'left', 'bold');
 }
 function spoolIcon(f) { return (x, y) => drawSpool(x, y, 10, FIL_COLOR[f], 0.8); }
+let panelMore = false, panelFor = -1; // UI only (Roblox: a local ScreenGui state), never saved
 function panelPrinter(p, hint) {
+  if (panelFor !== p.slot) { panelFor = p.slot; panelMore = false; }
   const td = tierDef(p.tier), st = statusOf(p), f = filDef(p.fil);
   card(838, 62, 436, 404, `Drucker #${p.slot + 1} · ${TIER_NAME[p.tier]}`);
   text(st.s, 1262, 76, 13, st.c, 'right', 'bold');
   const wc = p.wear >= tune.wear_warn ? (p.wear >= tune.wear_clog_start ? '#e5484d' : '#f39a2b') : '#4cc36a';
   text(`Verschleiß ${Math.round(p.wear)} %`, 850, 98, 12, '#c6cdd5', 'left');
   bar(960, 93, 302, 10, p.wear / 100, wc);
-  // spool
-  const sd = filDef(p.spool.type), o = objDef(p.job);
-  drawSpool(864, 132, 16, sd.color, clamp(p.spool.g / tune.pack_grams, 0, 1));
-  text(`Spule: ${p.spool.g > 0 ? sd.name : 'leer'}`, 888, 122, 13, '#f1f4f7', 'left', 'bold');
-  text(`${Math.round(p.spool.g)} g · reicht für ${Math.floor(p.spool.g / o.g)}× ${OBJ_SHORT[p.job]}`, 888, 141, 12, p.spool.g < o.g ? '#ffb15e' : '#9aa5b1', 'left');
-  const swap = p.spool.type !== p.fil && p.spool.g > 0;
-  button(1080, 112, 186, 40, `Nachfüllen ${eur(f.price)}`, () => refill(p), { key: 'F', sub: swap ? `Wechsel: ${Math.round(p.spool.g)} g weg` : `+${tune.pack_grams} g ${f.name}`, subC: swap ? '#ffb15e' : undefined, enabled: state.money >= f.price, pulse: hint && hint.id === 'refill' });
-  text('Filamentsorte (Q)', 850, 166, 12, '#c6cdd5', 'left', 'bold');
-  text(`Fehler ${Math.round(f.fail * 100)} % · Wert ×${num(f.value)}`, 1262, 166, 12, '#9aa5b1', 'right');
-  FIL.forEach((fi, i) => button(846 + i * 106, 176, 100, 28, FIL_SHORT[fi], () => chooseFil(p, fi), { enabled: FIL_TIER[fi] <= p.tier, active: p.fil === fi, icon: spoolIcon(fi) }));
-  text('Auftrag (T, läuft in Schleife)', 850, 218, 12, '#c6cdd5', 'left', 'bold');
+  if (!panelMore) {
+    const sd = filDef(p.spool.type), o = objDef(p.job);
+    drawSpool(864, 132, 16, sd.color, clamp(p.spool.g / tune.pack_grams, 0, 1));
+    text(`Spule: ${p.spool.g > 0 ? sd.name : 'leer'}`, 888, 122, 13, '#f1f4f7', 'left', 'bold');
+    text(`${Math.round(p.spool.g)} g · reicht für ${Math.floor(p.spool.g / o.g)}× ${OBJ_SHORT[p.job]}`, 888, 141, 12, p.spool.g < o.g ? '#ffb15e' : '#9aa5b1', 'left');
+    const swap = p.spool.type !== p.fil && p.spool.g > 0;
+    button(1080, 112, 186, 40, `Filament ${eur(f.price)}`, () => refill(p), { key: 'F', sub: swap ? `Wechsel: ${Math.round(p.spool.g)} g weg` : `+${tune.pack_grams} g ${f.name}`, subC: swap ? '#ffb15e' : undefined, enabled: state.money >= f.price, pulse: hint && hint.id === 'refill' });
+    text(`Druckt: ${o.name} · ${eur(o.price * f.value)} · ${num(printTime(p, p.job, p.fil))} s`, 850, 172, 13, '#c6cdd5', 'left');
+    text(`Roboter: ${p.autoMaint ? 'ja' : 'nein'} · Zuführung: ${p.autoFeed ? 'ja' : 'nein'}`, 850, 194, 12, p.autoMaint || p.autoFeed ? '#f2c037' : '#9aa5b1', 'left');
+    button(846, 212, 420, 56, p.auto ? 'Stopp' : 'Start', () => toggleRun(p), { key: 'E', bg: p.auto ? '#7a3b3b' : '#2f8a4c', pulse: hint && hint.id === 'start' && !p.auto, size: 16, sub: p.auto ? 'druckt in Schleife' : 'Schleife aus' });
+    if (p.status === 'clog') button(846, 276, 420, 56, 'Reparieren', () => doRepair(p), { key: 'R', size: 16, sub: eur(td.repair), enabled: state.money >= td.repair, bg: '#9a3036', pulse: hint && hint.id === 'repair' });
+    else button(846, 276, 420, 56, p.maintQueued ? 'Wartung geplant' : 'Wartung', () => doMaint(p), { key: 'R', size: 16, sub: eur(td.maint) + (p.status === 'print' ? ' · nach dem Druck' : ''), enabled: p.status !== 'maint' && p.status !== 'repair' && p.status !== 'held' && state.money >= td.maint, active: p.maintQueued, pulse: hint && hint.id === 'maint' });
+    button(846, 344, 420, 46, 'Mehr …', () => { panelMore = true; }, { sub: 'Bauplan, Filamentsorte, Upgrade, Automatisierung', pulse: hint && hint.id === 'auto' });
+    text('Tasten: Q Filamentsorte · T Auftrag · U Upgrade', 850, 410, 12, '#9aa5b1', 'left');
+    return;
+  }
+  text('Filamentsorte (Q)', 850, 120, 12, '#c6cdd5', 'left', 'bold');
+  text(`Fehler ${Math.round(f.fail * 100)} % · Wert ×${num(f.value)} · Tempo ×${num(f.speed)}`, 1262, 120, 12, '#9aa5b1', 'right');
+  FIL.forEach((fi, i) => button(846 + i * 106, 130, 100, 28, FIL_SHORT[fi], () => chooseFil(p, fi), { enabled: FIL_TIER[fi] <= p.tier, active: p.fil === fi, icon: spoolIcon(fi) }));
+  text('Druckauftrag und Baupläne (T)', 850, 172, 12, '#c6cdd5', 'left', 'bold');
   OBJ.forEach((ob, i) => {
-    const d = objDef(ob), x = 846 + (i % 2) * 212, y = 228 + Math.floor(i / 2) * 42;
+    const d = objDef(ob), x = 846 + (i % 2) * 212, y = 182 + Math.floor(i / 2) * 42;
     const owned = state.plans[ob], tierOk = d.tier <= p.tier;
     let sub, en = true, subC;
     if (!owned) { sub = `Bauplan kaufen: ${eur(d.plan)}`; en = state.money >= d.plan; subC = '#ffd98a'; }
     else if (!tierOk) { sub = `braucht ${TIER_NAME[d.tier]}-Drucker`; en = false; }
-    else sub = `${eur(d.price * f.value)} · ${d.g} g · ${num(d.time / td.speed)} s`;
+    else sub = `${eur(d.price * f.value)} · ${d.g} g · ${num(printTime(p, ob, p.fil))} s`;
     button(x, y, 206, 38, d.name, () => chooseJob(p, ob), { sub, enabled: en, active: owned && p.job === ob, subC, icon: (ix, iy) => drawObj(ob, ix, iy + 11, 0.62, 1, owned ? f.color : '#6c7682') });
   });
-  const by = 358;
-  button(846, by, 120, 40, p.auto ? 'Stopp' : 'Start', () => toggleRun(p), { key: 'E', bg: p.auto ? '#7a3b3b' : '#2f8a4c', pulse: hint && hint.id === 'start' && !p.auto, size: 14, sub: p.auto ? 'Schleife an' : 'Schleife aus' });
-  if (p.status === 'clog') button(972, by, 144, 40, 'Reparieren', () => doRepair(p), { key: 'R', sub: eur(td.repair), enabled: state.money >= td.repair, bg: '#9a3036', pulse: hint && hint.id === 'repair' });
-  else button(972, by, 144, 40, p.maintQueued ? 'Wartung geplant' : 'Wartung', () => doMaint(p), { key: 'R', sub: eur(td.maint) + (p.status === 'print' ? ' · nach Druck' : ''), enabled: p.status !== 'maint' && p.status !== 'repair' && p.status !== 'held' && state.money >= td.maint, active: p.maintQueued, pulse: hint && hint.id === 'maint' });
-  if (p.tier < 2) button(1122, by, 144, 40, `Auf ${TIER_NAME[p.tier + 1]}`, () => doUpgrade(p), { key: 'U', sub: busy(p) ? 'erst Druck abwarten' : eur(td.upgrade), enabled: state.money >= td.upgrade && !busy(p), bg: '#6a4a9a' });
-  else text('Höchste Stufe', 1194, by + 20, 12, '#9aa5b1', 'center');
-  text('Automatisierung für diesen Drucker', 850, 410, 12, '#c6cdd5', 'left', 'bold');
-  button(846, 420, 208, 40, p.autoMaint ? 'Wartungs-Roboter aktiv' : 'Wartungs-Roboter', () => buyAuto(p, 'maint'), { sub: p.autoMaint ? `wartet ab ${tune.auto_maint_at} % (kostet je Wartung)` : `${eur(tune.auto_maint_price)} · wartet selbst`, enabled: p.autoMaint || state.money >= tune.auto_maint_price, active: p.autoMaint, bg: '#7a5e14', pulse: hint && hint.id === 'auto' && !p.autoMaint });
-  button(1058, 420, 208, 40, p.autoFeed ? 'Filament-Zuführung aktiv' : 'Filament-Zuführung', () => buyAuto(p, 'feed'), { sub: p.autoFeed ? 'kauft nach, wenn leer' : `${eur(tune.auto_feed_price)} · füllt selbst nach`, enabled: p.autoFeed || state.money >= tune.auto_feed_price, active: p.autoFeed, bg: '#7a5e14', pulse: hint && hint.id === 'auto' && !p.autoFeed });
+  text('Upgrade und Automatisierung', 850, 318, 12, '#c6cdd5', 'left', 'bold');
+  if (p.tier < 2) button(846, 328, 136, 44, `Auf ${TIER_NAME[p.tier + 1]}`, () => doUpgrade(p), { key: 'U', sub: busy(p) ? 'Druck abwarten' : eur(td.upgrade), enabled: state.money >= td.upgrade && !busy(p), bg: '#6a4a9a' });
+  else button(846, 328, 136, 44, 'Höchste Stufe', () => {}, { enabled: false });
+  button(988, 328, 136, 44, p.autoMaint ? 'Roboter aktiv' : 'Wartungs-Roboter', () => buyAuto(p, 'maint'), { sub: p.autoMaint ? `Wartung ×${num(tune.auto_maint_cost_mult)}` : eur(tune.auto_maint_price), enabled: p.autoMaint || state.money >= tune.auto_maint_price, active: p.autoMaint, bg: '#7a5e14', pulse: hint && hint.id === 'auto' && !p.autoMaint });
+  button(1130, 328, 136, 44, p.autoFeed ? 'Zuführung aktiv' : 'Zuführung', () => buyAuto(p, 'feed'), { sub: p.autoFeed ? 'kauft selbst nach' : eur(tune.auto_feed_price), enabled: p.autoFeed || state.money >= tune.auto_feed_price, active: p.autoFeed, bg: '#7a5e14', pulse: hint && hint.id === 'auto' && !p.autoFeed });
+  text(`Roboter: wartet vor jedem Druck, der über ${tune.auto_maint_at} % käme · Wartung kostet ×${num(tune.auto_maint_cost_mult)}`, 850, 386, 11, '#9aa5b1', 'left');
+  button(846, 404, 420, 40, 'Zurück', () => { panelMore = false; }, {});
 }
 function panelOverview() {
   card(838, 62, 436, 404, 'Werkstatt-Übersicht');
@@ -1202,14 +1337,27 @@ function panelStation(kind, hint) {
     text(state.truck.st === 'dock' ? 'Lieferwagen steht am Tor' : `Lieferwagen unterwegs: ${state.truck.n} Pakete, ${eur(state.truck.value)}, zurück in ${Math.ceil(tune.ship_time - state.truck.t)} s`, 850, 128, 12, '#c6cdd5', 'left');
     text('Das Geld kommt, wenn der Lieferwagen zurück ist.', 850, 150, 12, '#9aa5b1', 'left');
     text(state.autoShip ? `Auto-Versand aktiv: packt und verschickt alle ${tune.auto_ship_every} s.` : 'Auto-Versand: Förderband + Packautomat, kein Laufen mehr nötig.', 850, 172, 12, state.autoShip ? '#7ee08f' : '#9aa5b1', 'left');
+  } else if (kind === 'board') {
+    card(838, 62, 436, 404, 'Auftragsbrett');
+    text(`Lohn ×${num(tune.order_mult)} auf den Normalpreis · Frist ${Math.round(tune.order_time)} s · verpasst: −${Math.round(tune.order_penalty * 100)} %`, 850, 98, 12, '#c6cdd5', 'left');
+    text('Aufträge sind Handarbeit: der Auto-Versand verschickt sie nie.', 850, 118, 12, '#9aa5b1', 'left');
+    text(`Angenommen (${state.orders.length}/${tune.order_max_active})`, 850, 146, 13, '#ffd98a', 'left', 'bold');
+    state.orders.forEach((o, i) => {
+      const y = 170 + i * 30, got = state.carry === o.id ? o.n : reservedFor(o), left = Math.ceil(o.deadline - state.t);
+      text(`${o.n}× ${OBJ_NAME[o.obj]} (${FIL_SHORT[o.fil]})`, 850, y, 13, '#f1f4f7', 'left', 'bold');
+      text(`${got}/${o.n} · ${left} s · ${eur(o.reward)}`, 1262, y, 12, left < 30 ? '#ff8a8a' : '#9aa5b1', 'right');
+    });
+    if (!state.orders.length) text('noch keine', 850, 170, 12, '#9aa5b1', 'left');
   } else if (kind === 'store') {
     card(838, 62, 436, 404, 'Lager-Regal');
     text(`Belegt: ${state.store.length} / ${storeCap()}`, 850, 104, 15, state.store.length >= storeCap() ? '#ff8a8a' : '#f1f4f7', 'left', 'bold');
     const v = state.store.reduce((a, b) => a + b.v, 0);
     text(`Wert im Regal: ${eur(v)} (erst verpacken und verschicken)`, 850, 128, 12, '#c6cdd5', 'left');
     text('Ist das Regal voll, bleiben fertige Teile im Drucker und er steht still.', 850, 150, 12, '#9aa5b1', 'left');
+    const res = state.store.filter(it => it.res).length;
+    text(`Für Aufträge reserviert (gelb markiert): ${res} Teile`, 850, 172, 12, '#f2c037', 'left');
   }
-  pr.forEach((q, i) => button(846, 380 - (pr.length - 1 - i) * 48, 420, 42, q[1], q[2], { key: q[0], enabled: q[3], bg: '#2f8a4c', size: 14, pulse: hint && ((hint.id === 'pack' && kind === 'pack') || (hint.id === 'ship' && kind === 'ship') || (hint.id === 'slot' && kind === 'slot')) && i === 0 }));
+  pr.forEach((q, i) => button(846, 412 - (pr.length - i) * 48, 420, 42, q[1], q[2], { key: q[0], enabled: q[3], bg: '#2f8a4c', size: 14, pulse: hint && ((hint.id === 'pack' && kind === 'pack') || (hint.id === 'ship' && kind === 'ship') || (hint.id === 'slot' && kind === 'slot') || (hint.id === 'board' && kind === 'board') || (hint.id === 'store' && kind === 'store')) && i === 0 }));
 }
 function drawPanel() {
   rect(830, 56, 450, 664, '#22272e');
@@ -1225,7 +1373,8 @@ function drawPanel() {
   text(`Pakete ${state.packed.length}`, 1110, 500, 13, '#f1f4f7', 'left', 'bold');
   text(state.truck.st === 'dock' ? 'Lieferwagen: am Tor' : `Lieferwagen: zurück in ${Math.ceil(tune.ship_time - state.truck.t)} s (${eur(state.truck.value)})`, 850, 524, 12, '#c6cdd5', 'left');
   text(state.autoShip ? 'Auto-Versand: an' : 'Auto-Versand: nein', 1262, 524, 12, state.autoShip ? '#7ee08f' : '#9aa5b1', 'right');
-  bar(850, 538, 412, 6, state.store.length / storeCap(), full ? '#e5484d' : '#5ab0ff');
+  const os = state.orders.map(o => `${state.carry === o.id ? o.n : reservedFor(o)}/${o.n} ${OBJ_SHORT[o.obj]} ${Math.ceil(o.deadline - state.t)} s`).join(' · ');
+  text(state.orders.length ? `Aufträge: ${os}` : 'Aufträge: keine (Auftragsbrett an der Wand)', 850, 544, 12, state.orders.some(o => o.deadline - state.t < 30) ? '#ff8a8a' : '#f2c037', 'left');
   // goals
   card(838, 562, 436, 152, 'Ziele');
   const rows = [['Jetzt', goal(state.ms)], ['Nächstes', goal(state.ms + 1)], ['Groß', bigGoal(state.big)]];
@@ -1241,18 +1390,29 @@ function drawPanel() {
 }
 function drawLedger() {
   state.ledger.slice(0, 3).forEach((l, i) => {
-    const x = 10 + i * 272, y = 688;
-    fillRR(x, y, 264, 26, 6, 'rgba(25,28,33,0.82)');
+    const x = (TOUCH ? 190 : 10) + i * (TOUCH ? 210 : 272), y = 688;
+    if (TOUCH && i > 1) return;
+    fillRR(x, y, TOUCH ? 200 : 264, 26, 6, 'rgba(25,28,33,0.82)');
     const c = l.amt > 0 ? '#7ee08f' : l.amt < 0 ? '#ff8a8a' : '#f3b25b';
     text(l.amt === 0 ? '±0 €' : (l.amt > 0 ? '+' : '') + eur(l.amt), x + 10, y + 13, 13, c, 'left', 'bold');
-    ctx.font = `12px ${FONT}`; let s = l.text; while (ctx.measureText(s).width > 170 && s.length > 4) s = s.slice(0, -2);
+    ctx.font = `12px ${FONT}`; let s = l.text; while (ctx.measureText(s).width > (TOUCH ? 106 : 170) && s.length > 4) s = s.slice(0, -2);
     if (s !== l.text) s += '…';
     text(s, x + 84, y + 13, 12, '#d6dce2', 'left');
   });
 }
 
 // ---- Scenes ----------------------------------------------------------------------------------
-function drawPlay() { ui = []; clear('#15181c'); drawFloorView(); drawLedger(); drawHUD(); drawPanel(); }
+function drawTouch() {
+  if (!TOUCH) return;
+  ell(JOY.x, JOY.y, tune.joy_radius, tune.joy_radius, 'rgba(20,24,30,0.45)');
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(JOY.x, JOY.y, tune.joy_radius, 0, Math.PI * 2); ctx.stroke();
+  ell(JOY.x + joy.dx * tune.joy_radius, JOY.y + joy.dy * tune.joy_radius, 24, 24, 'rgba(241,244,247,0.8)');
+  const pr = prompts()[0];
+  ell(ACT.x, ACT.y, ACT.r, ACT.r, pr && pr[3] ? 'rgba(47,138,76,0.9)' : 'rgba(60,66,76,0.75)');
+  text('E', ACT.x, ACT.y - 8, 26, '#fff', 'center', 'bold');
+  if (pr) { ctx.font = `bold 11px ${FONT}`; let l = pr[1]; while (ctx.measureText(l).width > 96 && l.length > 4) l = l.slice(0, -2); text(l === pr[1] ? l : l + '…', ACT.x, ACT.y + 18, 11, '#fff', 'center', 'bold'); }
+}
+function drawPlay() { ui = []; clear('#15181c'); drawFloorView(); drawLedger(); drawTouch(); drawHUD(); drawPanel(); }
 function overlay(x, y, w, h) { rect(0, 0, W, H, 'rgba(10,12,15,0.6)'); fillRR(x, y, w, h, 14, '#262c34'); rr(x, y, w, h, 14); ctx.strokeStyle = '#4a5260'; ctx.lineWidth = 2; ctx.stroke(); }
 const demoP = { tier: 1, status: 'print', prog: 0, wear: 20, job: 'dragon', fil: 'petg', spool: { type: 'petg', g: 200 }, slot: 2, cur: { job: 'dragon', fil: 'petg' } };
 const scenes = {
@@ -1315,7 +1475,7 @@ const scenes = {
       const n = state.near, p = n && n.kind === 'printer' ? printerAt(n.slot) : null;
       if (pressed('KeyE') || pressed('Space') || pressed('Enter')) pressPrompt('E');
       if (pressed('KeyF')) { if (p) refill(p); else pressPrompt('F'); }
-      if (pressed('KeyR') && p) doMaint(p);
+      if (pressed('KeyR')) { if (p) doMaint(p); else pressPrompt('R'); }
       if (pressed('KeyQ') && p) cycleFil(p);
       if (pressed('KeyT') && p) cycleJob(p);
       if (pressed('KeyU') && p) doUpgrade(p);
