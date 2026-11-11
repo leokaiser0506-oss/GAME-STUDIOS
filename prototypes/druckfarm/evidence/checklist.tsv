@@ -1,0 +1,31 @@
+L1	pass	evidence/play.png	Werkstatt mit Holzboden, Werkbänken, Lochwand mit Werkzeug; gezeichnete Drucker; Spaghetti beim Verstopfen in figures.png
+L2	pass	evidence/play.png	Wachsende Basis mit freien Plätzen und Preis, Probleme als Sprechblasen über den Druckern
+L3	pass	evidence/play.png	2.5D schräg von oben, Werkstatt passt ins Fenster; Zoom per Mausrad (index.html wheel-Handler)
+F1	pass	evidence/play.png	1 Drucker, 7 freie Plätze mit Preis, Vorschau beim Überfahren (drawSlots), max. 8
+F2	pass	evidence/figures.png	Starter, Pro, Industrie mit eigenem Tempo, Verschleiß und erlaubtem Filament (tierDef, FIL_TIER)
+F3	pass	evidence/play.png	Billig-PLA, PLA+, PETG, Resin mit Preis, Fehlerchance und Wertfaktor im Lager
+F4	pass	evidence/play.png	6 Druckobjekte, 5 per Bauplan kaufbar, teils mit Drucker-Stufe
+F5	pass	index.html:399	Verschleiß im Druck, Wartung (doMaint), Verstopfung (clog), Reparatur (doRepair), Fehldruck in finishPrint
+F6	pass	index.html:846	Buchungs-Chips mit Herkunft unten links, Heute +/ausgegeben im HUD, +€ steigt vom Drucker auf (index.html:387)
+F7	pass	evidence/play.png	Jetzt / Nächstes / Groß mit Balken; fast geschafft ab 75 % (index.html:939), Konfetti und Ton in celebrate
+F8	pass	index.html:442	Tagesende alle 90 s mit Einnahmen/Ausgaben nach Kategorie, save() in localStorage
+F9	pass	index.html:1038	Pleite-Bildschirm mit Grund und Statistik, Neue Werkstatt per Klick/R/Enter
+S1	pass	index.html:273	Filament wird pro Druck abgezogen, fehlt es, wartet der Drucker (Kein Billig-PLA)
+S2	pass	index.html:399	Fehldruck-Chance aus Filament + Verschleiß, Verstopfung ab 70 %, sicher bei 100 %
+S3	pass	index.html:303	Drucker kaufen auf freien Plätzen, Upgrade auf Pro/Industrie (doUpgrade)
+S4	pass	index.html:318	Baupläne für bessere Objekte kaufen, höhere Objekte brauchen bessere Drucker
+M1	pass	evidence/play.png	Ein Drucker, 120 g Billig-PLA, 50 € in der Kasse
+M2	pass	evidence/play.png	Banner und pulsierender Start-Knopf; Kopf fährt, Objekt wächst schichtweise (drawObj Clip)
+M3	pass	index.html:387	Schlüsselanhänger braucht 8 s bei Tempo 1
+M4	pass	index.html:389	Teil fliegt ins Verkaufsregal, +12 € steigt vom Drucker auf
+M5	pass	index.html:662	Spule am Drucker zeigt den Lagerstand und wird kleiner
+M6	pass	index.html:461	Hinweis „Filament wird knapp: kauf im Lager nach. Billig oder besser?“ mit pulsierenden Kauf-Knöpfen
+M7	pass	index.html:767	Ab 60 % Verschleiß (bei 1,2 %/s nach ca. 50 s Druck) orangener Schein und Sprechblase
+M8	pass	index.html:283	Wartung kostet 8 € und setzt Verschleiß auf 0
+M9	pass	evidence/play.png	Erstes Ziel „Kauf deinen zweiten Drucker“ zeigt Fortschritt (Start 50 %, nach ca. 1 min um 60 %)
+C1	not_assessed	-	Satzanfang ohne eigene Aussage (gehört zu C2)
+C2	not_assessed	-	Ob es nach 3 Minuten eng wird, ist Balance und Gefühl: kein Headless-Durchlauf zeigt das, das klärt erst dein Spielen
+C3	pass	index.html:399	Billig-PLA 15 % Fehldrucke, Verstopfung mit Spaghetti, Reparatur 40 € statt Wartung 8 €
+C4	pass	index.html:456	Pleite wenn nichts mehr geht (kein Filament, kein Geld) oder zwei Tage hintereinander im Minus
+C5	pass	config.js:58	Teurere Objekte brauchen Pro/Industrie; schnellere Drucker verschleißen schneller (1,2 / 1,6 / 2,2 %/s)
+C6	not_assessed	-	Nur eine Markierung, kein Inhalt

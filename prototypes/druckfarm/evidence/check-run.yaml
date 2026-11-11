@@ -1,0 +1,167 @@
+# The one-shot's small check (check-run/1).
+# Written by one-shot-check.sh --record: the results are /prototype's reading of
+# evidence/self-check.tsv; never edited by hand.
+kind: check-run/1
+engine: web
+browser: "HeadlessChrome/153.0.0.0"
+time: "2026-11-11 15:26:03"
+checks:
+  - id: boots
+    result: pass
+    evidence:
+      - "evidence/self-check.tsv"
+  - id: shot
+    result: not_run
+    mark: not assessed
+    why: "the-checks-own-play-shot-failed-twice-headless;evidence/play.png-was-taken-with-page-shot-scene=play-and-looked-at"
+    evidence:
+  - id: outlines
+    result: pass
+    evidence:
+      - "evidence/figures.png"
+  - id: brief-words
+    result: pass
+    evidence:
+      - "evidence/brief-words.tsv"
+  - id: emoji
+    result: pass
+    evidence:
+      - "evidence/self-check.tsv"
+  - id: nearest-game
+    result: pass
+    evidence:
+      - "evidence/nearest-game.txt"
+brief_checklist:
+  - id: L1
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Look: warme, aufgeräumte Werkstatt (Holzboden, Werkbänke, Lochwand mit Werkzeug). Gezeichnete Drucker mit Rahmen, Druckkopf und Bauplatte. Das Objekt wächst sichtbar Schicht für Schicht, Filamentspulen in ihrer Farbe hängen am Drucker. Farben: Holz- und Grautöne als Hintergrund, Grün = Geld und Erfolg, Orange = Warnung (Verschleiß), Rot = Verstopfung/Fehldruck, Spulenfarben als Akzente. Besonderheit: Ein verstopfter Drucker spuckt sichtbar „Spaghetti“ (Fadengewirr) aus. Jede Figur ist gezeichnet, kein Emoji, keine einfachen Kreise. *(provisional)*"
+  - id: L2
+    result: pass
+    evidence: "evidence/play.png"
+    item: "References: Roblox-Tycoons (wachsende Basis, Kaufknöpfe), Two Point Hospital (Probleme sieht man auf dem Boden) *(guessed)*"
+  - id: L3
+    result: pass
+    evidence: "evidence/play.png"
+    item: "View: 2.5D · Camera: schräg von oben (~50°), Werkstatt passt ins Fenster, Zoom *(provisional)*"
+  - id: F1
+    result: pass
+    evidence: "evidence/play.png"
+    item: "1 Drucker zum Start, platzierbare weitere Drucker auf einem Raster (Vorschau + Preis), max. 8 Plätze"
+  - id: F2
+    result: pass
+    evidence: "evidence/figures.png"
+    item: "3 Druckerstufen (Starter, Pro, Industrie): Tempo, Verschleiß, welche Filamente sie können"
+  - id: F3
+    result: pass
+    evidence: "evidence/play.png"
+    item: "3 Filamentsorten (Billig-PLA, PLA+, PETG; Resin später freischaltbar) mit Preis, Fehldruckchance und Wertbonus"
+  - id: F4
+    result: pass
+    evidence: "evidence/play.png"
+    item: "5-6 Druckobjekte, die man freischaltet (Schlüsselanhänger, Handyhalter, Figur, Ersatzteil, Helm ...)"
+  - id: F5
+    result: pass
+    evidence: "index.html:399"
+    item: "Verschleiß, Wartung (billig, vorbeugend), Verstopfung (teure Reparatur), Fehldruck (Filament verloren)"
+  - id: F6
+    result: pass
+    evidence: "index.html:846"
+    item: "Einnahmen und Ausgaben sichtbar mit Herkunft, Geld steigt vom Drucker auf"
+  - id: F7
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Meilensteine Jetzt / Nächstes / Groß mit „fast geschafft“-Anzeige und Feier beim Erreichen"
+  - id: F8
+    result: pass
+    evidence: "index.html:442"
+    item: "Tageszusammenfassung (verdient / ausgegeben) alle paar Minuten, Spielstand im Browser gespeichert"
+  - id: F9
+    result: pass
+    evidence: "index.html:1038"
+    item: "Pleite-Bildschirm und Neustart"
+  - id: S1
+    result: pass
+    evidence: "index.html:273"
+    item: "Filament als Ressource · in the slice"
+  - id: S2
+    result: pass
+    evidence: "index.html:399"
+    item: "Druckfehler / Wartung · in the slice"
+  - id: S3
+    result: pass
+    evidence: "index.html:303"
+    item: "Mehr und bessere Drucker kaufen · in the slice"
+  - id: S4
+    result: pass
+    evidence: "index.html:318"
+    item: "Bessere Druckobjekte · in the slice"
+  - id: M1
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Ein Drucker steht da, eine Spule PLA ist eingelegt, 50 € in der Kasse."
+  - id: M2
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Ein blinkender Hinweis auf „Schlüsselanhänger drucken“: Klick, und der Druckkopf fährt, das Teil wächst."
+  - id: M3
+    result: pass
+    evidence: "index.html:387"
+    item: "Nach ca."
+  - id: M4
+    result: pass
+    evidence: "index.html:389"
+    item: "8 s ist es fertig und fliegt ins Verkaufsregal, +12 € steigen auf."
+  - id: M5
+    result: pass
+    evidence: "index.html:662"
+    item: "Der zweite Druck läuft und die Spule wird sichtbar leerer."
+  - id: M6
+    result: pass
+    evidence: "index.html:461"
+    item: "Dann kommt der Hinweis „Filament kaufen“: Billig oder gut?"
+  - id: M7
+    result: pass
+    evidence: "index.html:767"
+    item: "Etwa bei Sekunde 50 färbt sich der Drucker orange (Verschleiß)."
+  - id: M8
+    result: pass
+    evidence: "index.html:283"
+    item: "Ein Klick auf „Warten“ kostet ein bisschen und setzt ihn zurück."
+  - id: M9
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Das erste Ziel „Kauf deinen zweiten Drucker“ ist bei 60 %."
+  - id: C1
+    result: not_run
+    mark: not assessed
+    why: "Satzanfang ohne eigene Aussage (gehört zu C2)"
+    item: "Ab ca."
+  - id: C2
+    result: not_run
+    mark: not assessed
+    why: "Ob es nach 3 Minuten eng wird, ist Balance und Gefühl: kein Headless-Durchlauf zeigt das, das klärt erst dein Spielen"
+    item: "3 Minuten wird es eng: Mehrere Drucker fressen schneller Filament als gedacht."
+  - id: C3
+    result: pass
+    evidence: "index.html:399"
+    item: "Billiges Filament verursacht Fehldrucke, ignorierte Wartung führt zu Verstopfung (Spaghetti, der Drucker steht still, die Reparatur ist teurer als Wartung)."
+  - id: C4
+    result: pass
+    evidence: "index.html:456"
+    item: "Geld unter 0 bei leeren Spulen und stillstehenden Druckern bedeutet Pleite: Der Run endet und es geht von vorn los."
+  - id: C5
+    result: pass
+    evidence: "config.js:58"
+    item: "Später: teurere Objekte brauchen bessere Drucker und Filamentsorten (PETG, Resin), und Verschleiß wächst mit dem Tempo."
+  - id: C6
+    result: not_run
+    mark: not assessed
+    why: "Nur eine Markierung, kein Inhalt"
+    item: "*(provisional)*"
+measures:
+  - id: step-time
+    value: 4.500
+    unit: ms
+    by: browser
+    detail: "mean 0.016 ms, slowest 4.500 ms, 766 steps"

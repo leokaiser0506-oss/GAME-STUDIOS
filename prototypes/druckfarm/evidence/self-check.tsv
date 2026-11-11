@@ -1,0 +1,137 @@
+time	2026-11-11 15:26:03
+keep	lines	0	pinned	0
+briefword	3d	unlisted
+checklist	L1	unlisted	-	Look: warme, aufgeräumte Werkstatt (Holzboden, Werkbänke, Lochwand mit Werkzeug). Gezeichnete Drucker mit Rahmen, Druckkopf und Bauplatte. Das Objekt wächst sichtbar Schicht für Schicht, Filamentspulen in ihrer Farbe hängen am Drucker. Farben: Holz- und Grautöne als Hintergrund, Grün = Geld und Erfolg, Orange = Warnung (Verschleiß), Rot = Verstopfung/Fehldruck, Spulenfarben als Akzente. Besonderheit: Ein verstopfter Drucker spuckt sichtbar „Spaghetti“ (Fadengewirr) aus. Jede Figur ist gezeichnet, kein Emoji, keine einfachen Kreise. *(provisional)*	
+checklist	L2	unlisted	-	References: Roblox-Tycoons (wachsende Basis, Kaufknöpfe), Two Point Hospital (Probleme sieht man auf dem Boden) *(guessed)*	
+checklist	L3	unlisted	-	View: 2.5D · Camera: schräg von oben (~50°), Werkstatt passt ins Fenster, Zoom *(provisional)*	
+checklist	F1	unlisted	-	1 Drucker zum Start, platzierbare weitere Drucker auf einem Raster (Vorschau + Preis), max. 8 Plätze	
+checklist	F2	unlisted	-	3 Druckerstufen (Starter, Pro, Industrie): Tempo, Verschleiß, welche Filamente sie können	
+checklist	F3	unlisted	-	3 Filamentsorten (Billig-PLA, PLA+, PETG; Resin später freischaltbar) mit Preis, Fehldruckchance und Wertbonus	
+checklist	F4	unlisted	-	5-6 Druckobjekte, die man freischaltet (Schlüsselanhänger, Handyhalter, Figur, Ersatzteil, Helm ...)	
+checklist	F5	unlisted	-	Verschleiß, Wartung (billig, vorbeugend), Verstopfung (teure Reparatur), Fehldruck (Filament verloren)	
+checklist	F6	unlisted	-	Einnahmen und Ausgaben sichtbar mit Herkunft, Geld steigt vom Drucker auf	
+checklist	F7	unlisted	-	Meilensteine Jetzt / Nächstes / Groß mit „fast geschafft“-Anzeige und Feier beim Erreichen	
+checklist	F8	unlisted	-	Tageszusammenfassung (verdient / ausgegeben) alle paar Minuten, Spielstand im Browser gespeichert	
+checklist	F9	unlisted	-	Pleite-Bildschirm und Neustart	
+checklist	S1	unlisted	-	Filament als Ressource · in the slice	
+checklist	S2	unlisted	-	Druckfehler / Wartung · in the slice	
+checklist	S3	unlisted	-	Mehr und bessere Drucker kaufen · in the slice	
+checklist	S4	unlisted	-	Bessere Druckobjekte · in the slice	
+checklist	M1	unlisted	-	Ein Drucker steht da, eine Spule PLA ist eingelegt, 50 € in der Kasse.	
+checklist	M2	unlisted	-	Ein blinkender Hinweis auf „Schlüsselanhänger drucken“: Klick, und der Druckkopf fährt, das Teil wächst.	
+checklist	M3	unlisted	-	Nach ca.	
+checklist	M4	unlisted	-	8 s ist es fertig und fliegt ins Verkaufsregal, +12 € steigen auf.	
+checklist	M5	unlisted	-	Der zweite Druck läuft und die Spule wird sichtbar leerer.	
+checklist	M6	unlisted	-	Dann kommt der Hinweis „Filament kaufen“: Billig oder gut?	
+checklist	M7	unlisted	-	Etwa bei Sekunde 50 färbt sich der Drucker orange (Verschleiß).	
+checklist	M8	unlisted	-	Ein Klick auf „Warten“ kostet ein bisschen und setzt ihn zurück.	
+checklist	M9	unlisted	-	Das erste Ziel „Kauf deinen zweiten Drucker“ ist bei 60 %.	
+checklist	C1	unlisted	-	Ab ca.	
+checklist	C2	unlisted	-	3 Minuten wird es eng: Mehrere Drucker fressen schneller Filament als gedacht.	
+checklist	C3	unlisted	-	Billiges Filament verursacht Fehldrucke, ignorierte Wartung führt zu Verstopfung (Spaghetti, der Drucker steht still, die Reparatur ist teurer als Wartung).	
+checklist	C4	unlisted	-	Geld unter 0 bei leeren Spulen und stillstehenden Druckern bedeutet Pleite: Der Run endet und es geht von vorn los.	
+checklist	C5	unlisted	-	Später: teurere Objekte brauchen bessere Drucker und Filamentsorten (PETG, Resin), und Verschleiß wächst mit dem Tempo.	
+checklist	C6	unlisted	-	*(provisional)*	
+browser	HeadlessChrome/153.0.0.0
+scene	play	0	title
+scene	play	1	play
+digits	log	16px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	3.828
+digits	log	bold 4px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	0.98
+digits	log	bold 12px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	2.941
+digits	log	bold 28px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	6.863
+digits	log	bold 15px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	3.677
+digits	log	14px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	3.35
+digits	log	bold 13px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	3.187
+digits	log	13px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	3.11
+digits	log	12px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	2.871
+digits	log	bold 14px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	3.432
+digits	log	bold 17px "Trebuchet MS", "Segoe UI", Verdana, sans-serif	proportional	4.167
+measure	step-time	play	0.016	4.500	766
+lane	play	stop	12.8	340
+uncaught	play	0
+text	play	canvas	615,65,673,74	22.5	4.98	inside	VERKAUF
+text	play	canvas	531,156,535,159	4.8	2.16	inside	3D
+text	play	canvas	260,269,264,272	6.0	2.16	inside	3D
+text	play	canvas	183,309,231,317	18.0	4.35	inside	#1 Starter
+text	play	canvas	356,308,434,317	18.0	2.60	inside	Platz frei · 100 €
+text	play	canvas	508,308,586,317	18.0	2.60	inside	Platz frei · 100 €
+text	play	canvas	661,308,738,317	18.0	2.60	inside	Platz frei · 100 €
+text	play	canvas	180,485,258,493	18.0	2.60	inside	Platz frei · 100 €
+text	play	canvas	332,485,410,493	18.0	2.60	inside	Platz frei · 100 €
+text	play	canvas	484,485,562,493	18.0	2.60	inside	Platz frei · 100 €
+text	play	canvas	637,485,714,493	18.0	2.60	inside	Platz frei · 100 €
+text	play	canvas	143,554,173,563	19.5	8.37	inside	+12 €
+text	play	canvas	202,554,335,565	18.0	9.82	inside	Schlüsselanhänger (Billig) #1
+text	play	canvas	361,554,391,563	19.5	5.98	inside	−30 €
+text	play	canvas	421,554,502,565	18.0	9.82	inside	Billig-PLA +250 g
+text	play	canvas	142,12,191,30	42.0	9.73	inside	32 €
+text	play	canvas	284,11,316,23	22.5	14.30	inside	Tag 1
+text	play	canvas	403,17,541,27	22.5	9.84	inside	Miete + Strom heute: 16 €
+text	play	canvas	608,11,674,20	19.5	9.73	inside	Heute: +12 €
+text	play	canvas	608,26,694,36	19.5	7.83	inside	ausgegeben 30 €
+text	play	canvas	826,11,1143,21	18.0	6.31	inside	Klick: wählen / kaufen · Mausrad: Zoom · 1-8 Drucker · Leert
+text	play	canvas	838,25,1143,36	18.0	6.31	inside	W Wartung · R Reparieren · F Filament · B Drucker · P Pause 
+text	play	canvas	808,55,894,67	22.5	9.57	inside	Filament-Lager
+text	play	canvas	1078,57,1138,66	18.0	5.17	inside	Pack = 250 g
+text	play	canvas	829,70,881,81	19.5	11.71	inside	Billig-PLA
+text	play	canvas	830,83,937,93	18.0	5.17	inside	Fehler 15 % · Wert ×1,0
+text	play	canvas	961,75,992,88	22.5	11.71	inside	310 g
+text	play	canvas	1040,76,1106,85	19.5	8.12	inside	Kaufen  30 €
+text	play	canvas	829,96,855,104	19.5	11.71	inside	PLA+
+text	play	canvas	830,109,931,118	18.0	5.17	inside	Fehler 5 % · Wert ×1,3
+text	play	canvas	975,101,992,113	22.5	7.20	inside	0 g
+text	play	canvas	1040,102,1106,111	19.5	3.70	inside	Kaufen  50 €
+text	play	canvas	829,122,857,131	19.5	3.55	inside	PETG
+text	play	canvas	830,134,931,144	18.0	5.17	inside	Fehler 4 % · Wert ×1,7
+text	play	canvas	975,127,992,139	22.5	11.71	inside	0 g
+text	play	canvas	1025,128,1121,136	18.0	3.55	inside	braucht Pro-Drucker
+text	play	canvas	829,147,857,156	19.5	3.55	inside	Resin
+text	play	canvas	830,160,931,170	18.0	5.17	inside	Fehler 3 % · Wert ×2,3
+text	play	canvas	975,152,992,164	22.5	11.71	inside	0 g
+text	play	canvas	1034,153,1111,162	18.0	3.55	inside	braucht Industrie
+text	play	canvas	808,187,918,197	22.5	9.57	inside	Drucker #1 · Starter
+text	play	canvas	1074,187,1138,196	19.5	5.74	inside	Druckt 59 %
+text	play	canvas	808,205,882,214	18.0	8.06	inside	Verschleiß 15 %
+text	play	canvas	808,219,1098,230	18.0	5.17	inside	Tempo ×1,0 · Verschleiß 1,2 %/s · ab 70 % Gefahr: Verstopfun
+text	play	canvas	808,235,953,246	18.0	8.06	inside	Druckauftrag (läuft in Schleife)
+text	play	canvas	817,271,819,273	3.7	2.16	inside	3D
+text	play	canvas	829,253,928,264	19.5	4.93	inside	Schlüsselanhänger
+text	play	canvas	830,267,910,277	18.0	2.98	inside	12 € · 30 g · 8,0 s
+text	play	canvas	999,253,1062,264	19.5	3.70	inside	Handyhalter
+text	play	canvas	1000,267,1102,277	18.0	2.92	inside	Bauplan kaufen: 120 €
+text	play	canvas	829,288,897,299	19.5	3.70	inside	Drachenfigur
+text	play	canvas	830,302,932,312	18.0	2.92	inside	Bauplan kaufen: 300 €
+text	play	canvas	999,288,1096,297	19.5	3.70	inside	Zahnrad-Ersatzteil
+text	play	canvas	1000,302,1102,312	18.0	2.92	inside	Bauplan kaufen: 600 €
+text	play	canvas	829,324,904,334	19.5	3.70	inside	Cosplay-Helm
+text	play	canvas	830,337,941,347	18.0	2.92	inside	Bauplan kaufen: 1.500 €
+text	play	canvas	999,324,1081,333	19.5	3.70	inside	Drohnenrahmen
+text	play	canvas	1000,337,1111,347	18.0	2.92	inside	Bauplan kaufen: 4.000 €
+text	play	canvas	808,354,939,363	18.0	8.06	inside	Filament für diesen Drucker
+text	play	canvas	829,374,854,385	19.5	4.93	inside	Billig
+text	play	canvas	914,374,940,382	19.5	8.12	inside	PLA+
+text	play	canvas	999,374,1027,383	19.5	3.70	inside	PETG
+text	play	canvas	1084,374,1112,383	19.5	3.70	inside	Resin
+text	play	canvas	824,407,859,420	22.5	7.56	inside	Stopp
+text	play	canvas	817,421,867,430	18.0	4.58	inside	Schleife an
+text	play	canvas	882,408,968,418	19.5	4.93	inside	Wartung geplant
+text	play	canvas	888,422,963,430	18.0	2.98	inside	8 € · nach Druck
+text	play	canvas	986,408,1041,418	19.5	3.70	inside	Reparieren
+text	play	canvas	1003,422,1024,430	18.0	2.92	inside	40 €
+text	play	canvas	1082,408,1121,417	19.5	3.70	inside	Auf Pro
+text	play	canvas	1073,422,1130,432	18.0	2.92	inside	erst stoppen
+text	play	canvas	808,456,835,466	22.5	9.57	inside	Ziele
+text	play	canvas	808,470,833,478	18.0	9.57	inside	Jetzt
+text	play	canvas	864,470,1013,478	19.5	11.71	inside	Kauf deinen zweiten Drucker
+text	play	canvas	1111,470,1138,478	18.0	7.97	inside	+25 €
+text	play	canvas	1114,483,1138,491	18.0	5.17	inside	32 %
+text	play	canvas	808,503,853,512	18.0	5.17	inside	Nächstes
+text	play	canvas	865,503,959,514	19.5	11.71	inside	Mach eine Wartung
+text	play	canvas	1111,504,1138,512	18.0	7.97	inside	+15 €
+text	play	canvas	1120,517,1138,525	18.0	5.17	inside	0 %
+text	play	canvas	808,537,831,545	18.0	5.17	inside	Groß
+text	play	canvas	864,537,1003,547	19.5	11.71	inside	Verdiene insgesamt 1.000 €
+text	play	canvas	1104,537,1138,545	18.0	7.97	inside	+100 €
+text	play	canvas	1121,550,1138,558	18.0	5.17	inside	1 %
+screen	play	drawn
+responds	changed	4

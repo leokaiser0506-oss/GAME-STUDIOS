@@ -1,0 +1,1090 @@
+<!doctype html>
+<!-- PROTOTYPE - NOT FOR PRODUCTION -->
+<!-- Question: Macht der Loop aus Filament, Drucken, Verkaufen und Upgraden mit Fehlern und Wartung 15+ Minuten Spaß, und stimmt die Balance? -->
+<!-- Date: 2026-11-11 -->
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Druckfarm</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #15181c; overflow: hidden; }
+  body { font-variant-numeric: tabular-nums; }
+  canvas { display: block; margin: 0 auto; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script src="config.js"></script>
+<script>
+'use strict';
+// Druckfarm: a 3D-printer business tycoon. Buy filament, print, sell, maintain, expand.
+
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value }); // live: tune.speed is CONFIG.speed.value
+const STEP = 1 / 60;            // simulation step in seconds; motion is per second, never per frame
+const W = 1280, H = 720;        // logical size
+const PIXEL = false;
+const FONT = '"Trebuchet MS", "Segoe UI", Verdana, sans-serif';
+const TITLE = 'Druckfarm';
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 }; // a check may inject one
+const CHEAP = params.get('render') === 'cheap';
+let seed;
+function rng() { // mulberry32; every gameplay random call reads this, never Math.random
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const events = []; // window.game.events
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let VIEW = { s: 1, left: 0, top: 0 };
+function fit() {
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = k, r = s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = true;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center', weight = '') {
+  ctx.fillStyle = c; ctx.font = `${weight} ${size}px ${FONT}`; ctx.textAlign = align;
+  ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h); ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r); ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y); ctx.closePath();
+}
+function fillRR(x, y, w, h, r, c) { rr(x, y, w, h, r); ctx.fillStyle = c; ctx.fill(); }
+function poly(pts, c, stroke) {
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath(); if (c) { ctx.fillStyle = c; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
+function ell(x, y, rx, ry, c) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const ch = s => Math.max(0, Math.min(255, Math.round(((n >> s) & 255) * f)));
+  return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+}
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function eur(n) {
+  const neg = n < 0, v = Math.round(Math.abs(n)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return (neg ? '−' : '') + v + ' €';
+}
+function pct(f) { return Math.round(f * 100) + ' %'; }
+function num(f, d = 1) { return f.toFixed(d).replace('.', ','); }
+
+// ---- Input ------------------------------------------------------------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code);
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('blur', () => down.clear());
+const mouse = { x: -1, y: -1, in: false, downAt: null, drag: false };
+const clicks = [];
+function toLogical(e) {
+  const b = canvas.getBoundingClientRect();
+  return { x: (e.clientX - b.left) / b.width * W, y: (e.clientY - b.top) / b.height * H };
+}
+canvas.addEventListener('pointerdown', e => {
+  startAudio(); const p = toLogical(e);
+  mouse.downAt = { x: p.x, y: p.y, cx: cam.cx, cy: cam.cy }; mouse.drag = false;
+});
+canvas.addEventListener('pointermove', e => {
+  const p = toLogical(e); mouse.x = p.x; mouse.y = p.y; mouse.in = true;
+  if (mouse.downAt && inFloor(mouse.downAt) && cam.zoom > 1.001) {
+    const dx = p.x - mouse.downAt.x, dy = p.y - mouse.downAt.y;
+    if (Math.hypot(dx, dy) > 6) mouse.drag = true;
+    if (mouse.drag) { cam.cx = mouse.downAt.cx - dx / cam.zoom; cam.cy = mouse.downAt.cy - dy / cam.zoom; clampCam(); }
+  }
+});
+canvas.addEventListener('pointerup', e => {
+  const p = toLogical(e);
+  if (mouse.downAt && !mouse.drag) clicks.push({ x: p.x, y: p.y });
+  mouse.downAt = null; mouse.drag = false;
+});
+canvas.addEventListener('pointerleave', () => { mouse.in = false; });
+canvas.addEventListener('wheel', e => {
+  e.preventDefault(); const p = toLogical(e);
+  if (!inFloor(p)) return;
+  const before = toWorld(p.x, p.y);
+  cam.zoom = clamp(cam.zoom * Math.exp(-e.deltaY * 0.0012), 1, 1.9);
+  cam.cx = before.x - (p.x - FCX) / cam.zoom; cam.cy = before.y - (p.y - FCY) / cam.zoom; clampCam();
+}, { passive: false });
+
+// ---- Audio --------------------------------------------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted));
+function tone(freq, dur, type = 'square', vol = 0.3, delay = 0) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime + delay, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  coin() { tone(880, 0.08, 'triangle', 0.18); tone(1320, 0.12, 'triangle', 0.15, 0.06); },
+  buy() { tone(330, 0.06, 'square', 0.12); tone(220, 0.1, 'square', 0.12, 0.05); },
+  click() { tone(600, 0.04, 'square', 0.08); },
+  fail() { tone(200, 0.2, 'sawtooth', 0.12); },
+  clog() { tone(110, 0.35, 'sawtooth', 0.2); tone(90, 0.4, 'sawtooth', 0.15, 0.15); },
+  fixed() { tone(520, 0.08, 'triangle', 0.15); tone(780, 0.12, 'triangle', 0.15, 0.08); },
+  goal() { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.18, 'triangle', 0.18, i * 0.09)); },
+  bad() { tone(160, 0.3, 'square', 0.12); },
+};
+
+// ---- Data tables (numbers come from config.js) ------------------------------------------
+const FIL = ['cheap', 'plus', 'petg', 'resin'];
+const FIL_NAME = { cheap: 'Billig-PLA', plus: 'PLA+', petg: 'PETG', resin: 'Resin' };
+const FIL_SHORT = { cheap: 'Billig', plus: 'PLA+', petg: 'PETG', resin: 'Resin' };
+const FIL_COLOR = { cheap: '#e7d3a1', plus: '#3d84f0', petg: '#1fbfa2', resin: '#a45cf2' };
+const FIL_TIER = { cheap: 0, plus: 0, petg: 1, resin: 2 };
+function filDef(id) {
+  return { id, name: FIL_NAME[id], color: FIL_COLOR[id], tier: FIL_TIER[id],
+    price: tune[`fil_${id}_price`], fail: tune[`fil_${id}_fail`], value: tune[`fil_${id}_value`] };
+}
+const OBJ = ['key', 'holder', 'dragon', 'gear', 'helmet', 'drone'];
+const OBJ_NAME = { key: 'Schlüsselanhänger', holder: 'Handyhalter', dragon: 'Drachenfigur', gear: 'Zahnrad-Ersatzteil', helmet: 'Cosplay-Helm', drone: 'Drohnenrahmen' };
+const OBJ_SHORT = { key: 'Anhänger', holder: 'Handyhalter', dragon: 'Drache', gear: 'Zahnrad', helmet: 'Helm', drone: 'Drohne' };
+const OBJ_TIER = { key: 0, holder: 0, dragon: 0, gear: 1, helmet: 1, drone: 2 };
+const OBJ_H = { key: 11, holder: 26, dragon: 34, gear: 34, helmet: 38, drone: 18 };
+function objDef(id) {
+  return { id, name: OBJ_NAME[id], tier: OBJ_TIER[id], h: OBJ_H[id],
+    g: tune[`obj_${id}_g`], time: tune[`obj_${id}_time`], price: tune[`obj_${id}_price`], plan: tune[`obj_${id}_plan`] };
+}
+const TIER_NAME = ['Starter', 'Pro', 'Industrie'];
+const TIER_KEY = ['starter', 'pro', 'ind'];
+function tierDef(t) {
+  const k = TIER_KEY[t];
+  return { name: TIER_NAME[t], speed: tune[`pr_${k}_speed`], wear: tune[`pr_${k}_wear`],
+    maint: tune[`pr_${k}_maint`], repair: tune[`pr_${k}_repair`],
+    upgrade: t === 0 ? tune.pr_pro_upgrade : t === 1 ? tune.pr_ind_upgrade : 0 };
+}
+
+// ---- Layout --------------------------------------------------------------------------------
+const FX0 = 0, FY0 = 56, FW = 830, FH = 664, FCX = FX0 + FW / 2, FCY = FY0 + FH / 2;
+const BW = 165, BD = 34, BS = 24; // bench width, depth, skew
+const cam = { zoom: 1, cx: FCX, cy: FCY };
+function clampCam() {
+  const hw = FW / 2 / cam.zoom, hh = FH / 2 / cam.zoom;
+  cam.cx = clamp(cam.cx, FX0 + hw, FX0 + FW - hw); cam.cy = clamp(cam.cy, FY0 + hh, FY0 + FH - hh);
+}
+function inFloor(p) { return p.x >= FX0 && p.x < FX0 + FW && p.y >= FY0 && p.y < FY0 + FH; }
+function toWorld(x, y) { return { x: (x - FCX) / cam.zoom + cam.cx, y: (y - FCY) / cam.zoom + cam.cy }; }
+function slotPos(i) {
+  const row = i < 4 ? 0 : 1, col = i % 4;
+  const x0 = (row === 0 ? 62 : 32) + col * 190, ty = row === 0 ? 380 : 600;
+  return { x0, ty, bx: x0 + BW / 2 + BS / 2, by: ty - BD / 2 + 4 };
+}
+function inSlot(i, w) {
+  const s = slotPos(i);
+  return w.x >= s.x0 - 4 && w.x <= s.x0 + BW + BS + 4 && w.y >= s.ty - 200 && w.y <= s.ty + 30;
+}
+const SHELF_Y = 198;
+
+// ---- State ---------------------------------------------------------------------------------
+const SAVE_KEY = 'druckfarm-save-v1';
+let scene, state, anim = 0, ui = [];
+function newPrinter(slot, tier = 0) {
+  return { slot, tier, wear: 0, job: 'key', fil: 'cheap', status: 'idle', prog: 0, timer: 0,
+    auto: false, maintQueued: false, cur: null, why: '' };
+}
+function freshToday() {
+  return { inc: 0, out: { Filament: 0, Wartung: 0, Reparatur: 0, Drucker: 0, Baupläne: 0, Upgrades: 0 }, prints: 0, fails: 0, clogs: 0 };
+}
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  state = {
+    t: 0, score: 0, gained: '',
+    money: tune.start_money, day: 1, dayT: 0, warn: false,
+    stock: { cheap: tune.start_filament, plus: 0, petg: 0, resin: 0 },
+    printers: [newPrinter(0)], sel: 0,
+    plans: { key: true, holder: false, dragon: false, gear: false, helmet: false, drone: false },
+    stats: { prints: 0, fails: 0, clogs: 0, maint: 0, repairs: 0, earned: 0, bestDay: 0, bought: 0,
+      byFil: { cheap: 0, plus: 0, petg: 0, resin: 0 } },
+    today: freshToday(), ledger: [], ms: 0, big: 0, summary: null, stuckT: 0, started: false,
+    fx: [], flying: [], shelf: [], confetti: [], banner: null, overReason: '',
+  };
+  cam.zoom = 1; cam.cx = FCX; cam.cy = FCY;
+}
+function save() {
+  try {
+    const s = Object.assign({}, state, { fx: [], flying: [], confetti: [], banner: null, seedNow: seed });
+    localStorage.setItem(SAVE_KEY, JSON.stringify(s));
+  } catch (e) { /* storage blocked: the game plays without saving */ }
+}
+function loadSave() {
+  try { const raw = localStorage.getItem(SAVE_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+}
+function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* ignore */ } }
+function continueGame(s) {
+  reset(); Object.assign(state, s); if (s.seedNow) seed = s.seedNow;
+  state.fx = []; state.flying = []; state.confetti = []; state.banner = null; scene = 'play';
+}
+
+// ---- Economy helpers ----------------------------------------------------------------------
+const maxTier = () => state.printers.reduce((m, p) => Math.max(m, p.tier), 0);
+const nextPrice = () => Math.round(tune.printer_base_price * Math.pow(tune.printer_price_growth, state.printers.length - 1));
+const rentToday = () => Math.round((tune.rent_base + tune.rent_per_printer * state.printers.length) * Math.pow(tune.rent_growth, state.day - 1));
+const filUnlocked = f => FIL_TIER[f] <= maxTier();
+function ledger(textS, amt) {
+  state.ledger.unshift({ text: textS, amt, t: state.t });
+  if (state.ledger.length > 6) state.ledger.pop();
+}
+function spend(cat, amt, label) {
+  if (state.money < amt) { sfx.bad(); return false; }
+  state.money -= amt; state.today.out[cat] = (state.today.out[cat] || 0) + amt; ledger(label, -amt); return true;
+}
+function earn(amt, label) {
+  state.money += amt; state.today.inc += amt; state.stats.earned += amt; state.score = Math.round(state.stats.earned);
+  ledger(label, amt);
+}
+function fx(x, y, s, c) { state.fx.push({ x, y, s, c, t: 0, life: 1.5 }); }
+function headPos(p) { const s = slotPos(p.slot); return { x: s.bx, y: s.by - 110 }; }
+
+// ---- Actions ---------------------------------------------------------------------------------
+function tryStart(p) {
+  const o = objDef(p.job), f = filDef(p.fil);
+  if (!state.plans[p.job] || o.tier > p.tier || f.tier > p.tier) { p.status = 'wait'; p.why = 'Auftrag passt nicht'; return false; }
+  if (state.stock[p.fil] < o.g) { p.status = 'wait'; p.why = 'Kein ' + f.name; return false; }
+  state.stock[p.fil] -= o.g; p.status = 'print'; p.prog = 0; p.cur = { job: p.job, fil: p.fil }; p.why = '';
+  return true;
+}
+function toggleRun(p) {
+  if (!p) return;
+  state.started = true;
+  if (p.auto) { p.auto = false; if (p.status === 'wait') p.status = 'idle'; sfx.click(); return; }
+  p.auto = true; sfx.click();
+  if (p.status === 'idle' || p.status === 'wait') tryStart(p);
+}
+function doMaint(p) {
+  if (!p || p.status === 'clog' || p.status === 'maint' || p.status === 'repair') return;
+  const c = tierDef(p.tier).maint;
+  if (p.status === 'print') { if (state.money >= c) { p.maintQueued = !p.maintQueued; sfx.click(); } else sfx.bad(); return; }
+  if (!spend('Wartung', c, `Wartung Drucker #${p.slot + 1}`)) return;
+  p.status = 'maint'; p.timer = 0; state.stats.maint++; sfx.click();
+}
+function doRepair(p) {
+  if (!p || p.status !== 'clog') return;
+  if (!spend('Reparatur', tierDef(p.tier).repair, `Reparatur Drucker #${p.slot + 1}`)) return;
+  p.status = 'repair'; p.timer = 0; state.stats.repairs++; sfx.click();
+}
+function doUpgrade(p) {
+  if (!p || p.tier >= 2 || p.status === 'print' || p.status === 'maint' || p.status === 'repair') return;
+  const t = tierDef(p.tier);
+  if (!spend('Upgrades', t.upgrade, `Upgrade #${p.slot + 1} auf ${TIER_NAME[p.tier + 1]}`)) return;
+  p.tier++; p.wear = 0; p.status = 'idle'; sfx.buy();
+  const s = slotPos(p.slot); fx(s.bx, s.by - 150, TIER_NAME[p.tier] + '!', '#ffd166');
+  if (p.auto) tryStart(p);
+}
+function buyPrinter(slot) {
+  if (state.printers.length >= 8 || state.printers.some(p => p.slot === slot)) return;
+  const price = nextPrice();
+  if (!spend('Drucker', price, `Neuer Drucker #${slot + 1}`)) return;
+  const sel = state.printers[state.sel];
+  const np = newPrinter(slot);
+  if (sel) { np.job = OBJ_TIER[sel.job] === 0 ? sel.job : 'key'; np.fil = FIL_TIER[sel.fil] === 0 ? sel.fil : 'cheap'; }
+  state.printers.push(np); state.sel = state.printers.length - 1; sfx.buy();
+  const s = slotPos(slot); fx(s.bx, s.by - 120, 'Neuer Drucker!', '#7ee08f');
+}
+function buyFil(f) {
+  if (!filUnlocked(f)) return;
+  if (!spend('Filament', filDef(f).price, `${FIL_NAME[f]} +${tune.pack_grams} g`)) return;
+  state.stock[f] += tune.pack_grams; state.stats.bought++; sfx.buy();
+}
+function buyPlan(o) {
+  if (state.plans[o]) return;
+  if (!spend('Baupläne', objDef(o).plan, `Bauplan ${OBJ_NAME[o]}`)) return;
+  state.plans[o] = true; sfx.buy();
+}
+function chooseJob(p, o) {
+  if (!state.plans[o]) { buyPlan(o); if (!state.plans[o]) return; }
+  if (OBJ_TIER[o] > p.tier) { sfx.bad(); return; }
+  p.job = o; sfx.click();
+  if (p.status === 'wait' && p.auto) tryStart(p);
+}
+function chooseFil(p, f) {
+  if (FIL_TIER[f] > p.tier) { sfx.bad(); return; }
+  p.fil = f; sfx.click();
+  if (p.status === 'wait' && p.auto) tryStart(p);
+}
+
+// ---- Goals -------------------------------------------------------------------------------------
+const cnt = n => Math.min(1, state.printers.length / n);
+const afford = c => Math.min(0.99, Math.max(0, state.money) / c);
+const MS = [
+  { t: () => 'Kauf deinen zweiten Drucker', p: () => state.printers.length >= 2 ? 1 : afford(nextPrice()), r: 25 },
+  { t: () => 'Mach eine Wartung', p: () => state.stats.maint >= 1 ? 1 : 0, r: 15 },
+  { t: () => 'Kauf den Bauplan „Handyhalter“', p: () => state.plans.holder ? 1 : afford(tune.obj_holder_plan), r: 30 },
+  { t: () => 'Besitze 3 Drucker', p: () => cnt(3), r: 50 },
+  { t: () => 'Rüste einen Drucker auf Pro auf', p: () => maxTier() >= 1 ? 1 : afford(tune.pr_pro_upgrade), r: 80 },
+  { t: () => 'Drucke 10 Teile aus PETG', p: () => Math.min(1, state.stats.byFil.petg / 10), r: 100 },
+  { t: () => 'Besitze 5 Drucker', p: () => cnt(5), r: 150 },
+  { t: () => 'Kauf den Bauplan „Cosplay-Helm“', p: () => state.plans.helmet ? 1 : afford(tune.obj_helmet_plan), r: 200 },
+  { t: () => 'Stell einen Industrie-Drucker auf', p: () => maxTier() >= 2 ? 1 : afford(tune.pr_ind_upgrade), r: 400 },
+  { t: () => 'Besitze 8 Drucker: volle Druckfarm', p: () => cnt(8), r: 600 },
+  { t: () => 'Drucke 20 Teile aus Resin', p: () => Math.min(1, state.stats.byFil.resin / 20), r: 800 },
+];
+function goal(i) {
+  if (i < MS.length) return MS[i];
+  const X = tune.daily_goal_base * Math.pow(2, i - MS.length);
+  return { t: () => `Verdiene ${eur(X)} an einem Tag`, p: () => Math.min(1, state.today.inc / X), r: Math.round(X * 0.15) };
+}
+function bigGoal(i) {
+  const X = [1000, 5000, 25000, 100000][i] || 100000 * Math.pow(4, i - 3);
+  return { t: () => `Verdiene insgesamt ${eur(X)}`, p: () => Math.min(1, state.stats.earned / X), r: Math.round(X * tune.big_goal_reward) };
+}
+function checkGoals() {
+  const g = goal(state.ms);
+  if (g.p() >= 1) { celebrate(g.t(), g.r); state.ms++; return; }
+  const b = bigGoal(state.big);
+  if (b.p() >= 1) { celebrate(b.t(), b.r); state.big++; }
+}
+function celebrate(label, reward) {
+  state.money += reward; state.today.inc += reward; ledger('Ziel: ' + label, reward);
+  state.banner = { s: `Ziel geschafft: ${label}  +${eur(reward)}`, t: 0, c: '#2f9e55' };
+  for (let i = 0; i < 50; i++) state.confetti.push({ x: 1050 + (rng() - 0.5) * 380, y: 570, vx: (rng() - 0.5) * 260, vy: -120 - rng() * 260, c: ['#ffd166', '#7ee08f', '#5ab0ff', '#ff7b9c'][i % 4], t: 0, r: rng() * 6 });
+  sfx.goal();
+}
+
+// ---- Simulation -------------------------------------------------------------------------------
+function finishPrint(p) {
+  const o = objDef(p.cur.job), f = filDef(p.cur.fil);
+  const wearFail = p.wear > tune.wear_fail_start ? (p.wear - tune.wear_fail_start) / (100 - tune.wear_fail_start) * tune.wear_fail_add : 0;
+  const s = slotPos(p.slot);
+  state.today.prints++;
+  if (rng() < f.fail + wearFail) {
+    state.stats.fails++; state.today.fails++;
+    fx(s.bx, s.by - 130, 'Fehldruck! −' + o.g + ' g', '#ff6b6b'); ledger(`Fehldruck #${p.slot + 1}: ${o.name}`, 0); sfx.fail();
+    events.push({ type: 'misprint', slot: p.slot });
+  } else {
+    const value = o.price * f.value;
+    earn(value, `${o.name} (${FIL_SHORT[f.id]}) #${p.slot + 1}`);
+    state.stats.prints++; state.stats.byFil[f.id]++;
+    fx(s.bx, s.by - 130, '+' + eur(value), '#7ee08f'); sfx.coin();
+    const slotN = state.shelf.length % 8;
+    state.flying.push({ id: o.id, c: f.color, x0: s.bx, y0: s.by - 40, x1: 505 + slotN * 39, y1: SHELF_Y, t: 0 });
+    events.push({ type: 'sold', slot: p.slot, value });
+  }
+  p.status = 'idle'; p.prog = 0; p.cur = null;
+  if (p.maintQueued) {
+    p.maintQueued = false;
+    if (spend('Wartung', tierDef(p.tier).maint, `Wartung Drucker #${p.slot + 1}`)) { p.status = 'maint'; p.timer = 0; state.stats.maint++; return; }
+  }
+  if (p.auto) tryStart(p);
+}
+function clog(p) {
+  const s = slotPos(p.slot);
+  p.status = 'clog'; p.prog = 0; p.cur = null; p.maintQueued = false;
+  state.stats.clogs++; state.today.clogs++;
+  fx(s.bx, s.by - 140, 'Verstopft!', '#ff6b6b'); ledger(`Drucker #${p.slot + 1} verstopft`, 0); sfx.clog();
+  events.push({ type: 'clog', slot: p.slot });
+}
+function updatePrinter(p, dt) {
+  const td = tierDef(p.tier);
+  if (p.status === 'print') {
+    const o = objDef(p.cur.job);
+    p.prog += dt * td.speed / o.time;
+    p.wear = Math.min(100, p.wear + td.wear * dt);
+    if (p.wear >= 100) { clog(p); return; }
+    if (p.wear > tune.wear_clog_start) {
+      const h = tune.clog_rate * (p.wear - tune.wear_clog_start) / (100 - tune.wear_clog_start);
+      if (rng() < h * dt) { clog(p); return; }
+    }
+    if (p.prog >= 1) finishPrint(p);
+  } else if (p.status === 'maint') {
+    p.timer += dt;
+    if (p.timer >= tune.maint_time) { p.wear = 0; p.status = 'idle'; sfx.fixed(); if (p.auto) tryStart(p); }
+  } else if (p.status === 'repair') {
+    p.timer += dt;
+    if (p.timer >= tune.repair_time) { p.wear = tune.repair_wear; p.status = 'idle'; sfx.fixed(); if (p.auto) tryStart(p); }
+  } else if (p.status === 'wait' && p.auto) {
+    tryStart(p);
+  }
+}
+const busy = p => p.status === 'print' || p.status === 'maint' || p.status === 'repair';
+function canAct() {
+  const unlocked = FIL.filter(filUnlocked);
+  const cheapest = Math.min(...unlocked.map(f => filDef(f).price));
+  for (const p of state.printers) {
+    if (p.status === 'clog') { if (state.money >= tierDef(p.tier).repair) return true; continue; }
+    for (const o of OBJ) {
+      if (!state.plans[o] || OBJ_TIER[o] > p.tier) continue;
+      for (const f of FIL) if (FIL_TIER[f] <= p.tier && state.stock[f] >= objDef(o).g) return true;
+    }
+    if (state.money >= cheapest) return true;
+  }
+  return false;
+}
+function endDay() {
+  const rent = rentToday();
+  state.money -= rent; ledger(`Miete + Strom Tag ${state.day}`, -rent);
+  const out = Object.values(state.today.out).reduce((a, b) => a + b, 0) + rent;
+  state.summary = { day: state.day, inc: state.today.inc, out: Object.assign({}, state.today.out), rent, total: out,
+    profit: state.today.inc - out, prints: state.today.prints, fails: state.today.fails, clogs: state.today.clogs, warn: false };
+  state.stats.bestDay = Math.max(state.stats.bestDay, state.today.inc);
+  if (state.money < 0) {
+    if (state.warn) { gameOver('Zwei Tage hintereinander im Minus: die Bank macht die Werkstatt zu.'); return; }
+    state.warn = true; state.summary.warn = true;
+  } else state.warn = false;
+  state.day++; state.dayT = 0; state.today = freshToday();
+  save(); scene = 'summary';
+}
+function gameOver(reason) {
+  state.overReason = reason;
+  state.gained = `Tag ${state.day} erreicht · ${eur(state.stats.earned)} verdient · ${state.printers.length} Drucker`;
+  clearSave(); sfx.clog(); scene = 'over';
+}
+function hintNow() {
+  if (!state.started) return { s: 'Klick auf „Start“: Drucker #1 druckt Schlüsselanhänger', id: 'start' };
+  const lowFil = state.printers.some(p => p.status === 'wait' && p.why.startsWith('Kein'));
+  if (state.stats.bought === 0 && (state.stock.cheap < 60 || lowFil)) return { s: 'Filament wird knapp: kauf im Lager nach. Billig oder besser?', id: 'buyfil' };
+  const clogged = state.printers.find(p => p.status === 'clog');
+  if (clogged && state.stats.repairs === 0) return { s: `Drucker #${clogged.slot + 1} ist verstopft! Reparieren ist teurer als Wartung.`, id: 'repair' };
+  const worn = state.printers.find(p => p.wear >= tune.wear_warn - 5 && p.status !== 'clog');
+  if (worn && state.stats.maint === 0) return { s: `Drucker #${worn.slot + 1} verschleißt: mach eine Wartung, bevor er verstopft`, id: 'maint' };
+  if (state.printers.length === 1 && state.money >= nextPrice()) return { s: 'Genug Geld: klick einen freien Platz und kauf Drucker #2', id: 'slot' };
+  if (state.printers.some(p => !p.auto && p.status === 'idle') && state.printers.length > 1 && state.printers.length <= 3) {
+    const p = state.printers.find(q => !q.auto && q.status === 'idle');
+    return { s: `Drucker #${p.slot + 1} steht still: wähl ihn aus und klick „Start“`, id: 'start' };
+  }
+  if (state.warn) return { s: 'Mahnung von der Bank: beende diesen Tag im Plus, sonst ist Schluss!', id: 'warn' };
+  return null;
+}
+function updatePlay(dt) {
+  state.t += dt; state.dayT += dt;
+  for (const p of state.printers) updatePrinter(p, dt);
+  checkGoals();
+  // bankruptcy when nothing can happen any more
+  if (!state.printers.some(busy) && !canAct()) {
+    state.stuckT += dt;
+    if (state.stuckT > tune.stuck_grace) { gameOver('Kein Filament, kein Geld für Nachschub oder Reparatur: Pleite.'); return; }
+  } else state.stuckT = 0;
+  // effects
+  for (const f of state.fx) { f.t += dt; f.y -= 34 * dt; }
+  state.fx = state.fx.filter(f => f.t < f.life);
+  for (const f of state.flying) f.t += dt / 0.7;
+  for (const f of state.flying.filter(q => q.t >= 1)) { state.shelf.push({ id: f.id, c: f.c, t: 0 }); if (state.shelf.length > 8) state.shelf.shift(); }
+  state.flying = state.flying.filter(f => f.t < 1);
+  for (const s of state.shelf) s.t += dt;
+  for (const c of state.confetti) { c.t += dt; c.vy += 420 * dt; c.x += c.vx * dt; c.y += c.vy * dt; c.r += dt * 8; }
+  state.confetti = state.confetti.filter(c => c.t < 1.8);
+  if (state.banner) { state.banner.t += dt; if (state.banner.t > 3) state.banner = null; }
+  if (state.dayT >= tune.day_length) endDay();
+}
+
+// ---- UI widgets --------------------------------------------------------------------------------
+function button(x, y, w, h, label, act, o = {}) {
+  const en = o.enabled !== false;
+  const hov = en && mouse.in && mouse.x >= x && mouse.x <= x + w && mouse.y >= y && mouse.y <= y + h;
+  let bg = o.bg || '#414a57';
+  if (o.active) bg = o.activeBg || '#2d6cad';
+  if (!en) bg = '#2a2f37';
+  rr(x, y, w, h, 6); ctx.fillStyle = hov ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0)';
+  fillRR(x, y, w, h, 6, bg);
+  if (hov) fillRR(x, y, w, h, 6, 'rgba(255,255,255,0.12)');
+  if (o.active) { rr(x + 1, y + 1, w - 2, h - 2, 6); ctx.strokeStyle = '#8cc8ff'; ctx.lineWidth = 2; ctx.stroke(); }
+  if (o.pulse) { const k = 0.5 + 0.5 * Math.sin(anim * 7); rr(x - 2, y - 2, w + 4, h + 4, 8); ctx.strokeStyle = `rgba(255,209,102,${0.45 + 0.55 * k})`; ctx.lineWidth = 3; ctx.stroke(); }
+  const tc = en ? '#f1f4f7' : '#a3acb6';
+  const lx = o.icon ? x + 30 : x + w / 2, al = o.icon ? 'left' : 'center';
+  if (o.icon) o.icon(x + 15, y + h / 2);
+  if (o.sub) {
+    text(label, lx, y + h / 2 - 8, o.size || 13, tc, al, 'bold');
+    text(o.sub, lx, y + h / 2 + 9, 12, en ? (o.active ? '#e8eef5' : (o.subC || '#c9d1da')) : '#959fab', al);
+  } else text(label, lx, y + h / 2, o.size || 13, tc, al, 'bold');
+  ui.push({ x, y, w, h, act, en });
+}
+function bar(x, y, w, h, f, c, bg = '#1e2228') {
+  fillRR(x, y, w, h, h / 2, bg);
+  if (f > 0) fillRR(x, y, Math.max(h, w * clamp(f, 0, 1)), h, h / 2, c);
+}
+function handleClicks() {
+  const list = clicks.splice(0);
+  for (const c of list) {
+    let used = false;
+    for (let i = ui.length - 1; i >= 0; i--) {
+      const b = ui[i];
+      if (c.x >= b.x && c.x <= b.x + b.w && c.y >= b.y && c.y <= b.y + b.h) { if (b.en) b.act(); used = true; break; }
+    }
+    if (!used && scene === 'play' && inFloor(c)) floorClick(toWorld(c.x, c.y));
+    if (!used && scenes[scene].anyClick) scenes[scene].anyClick();
+  }
+}
+function floorClick(w) {
+  for (const i of [4, 5, 6, 7, 0, 1, 2, 3]) {
+    if (!inSlot(i, w)) continue;
+    const idx = state.printers.findIndex(p => p.slot === i);
+    if (idx >= 0) { state.sel = idx; sfx.click(); } else buyPrinter(i);
+    return;
+  }
+}
+
+// ---- Drawing: figures -------------------------------------------------------------------------
+function drawSpool(x, y, r, color, frac) {
+  ell(x + 2, y + 2, r, r, 'rgba(0,0,0,0.25)');
+  ell(x, y, r, r, '#2a2e33');
+  const outer = r * (0.42 + 0.5 * clamp(frac, 0, 1));
+  if (frac > 0.01) {
+    ell(x, y, outer, outer, color);
+    ctx.strokeStyle = shade(color.length === 7 ? color : '#888888', 0.8); ctx.lineWidth = 1;
+    for (let k = 0.5; k < outer; k += 3) { ctx.beginPath(); ctx.arc(x, y, k + r * 0.3, 0.2, 2.6); ctx.stroke(); }
+  }
+  ell(x, y, r * 0.36, r * 0.36, '#6a717a'); ell(x, y, r * 0.14, r * 0.14, '#16191c');
+  ctx.strokeStyle = '#43494f'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r - 1, 0, Math.PI * 2); ctx.stroke();
+  for (let a = 0; a < 3; a++) { const an = a * 2.094 + 0.5; rect(x + Math.cos(an) * r * 0.24 - 1, y + Math.sin(an) * r * 0.24 - 1, 2, 2, '#16191c'); }
+}
+function drawObj(id, x, y, s, prog, color) {
+  const h = OBJ_H[id], base = color, lite = shade(color, 1.18), dark = shade(color, 0.68);
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  if (prog < 1) { ctx.beginPath(); ctx.rect(-40, -h * prog - 0.5, 80, h * prog + 4); ctx.clip(); }
+  ctx.lineJoin = 'round';
+  switch (id) {
+    case 'key':
+      poly([[-12, -5], [10, -5], [16, -9], [-6, -9]], lite);
+      fillRR(-12, -5, 22, 5, 1, base); poly([[10, -5], [16, -9], [16, -5], [10, 0]], dark);
+      ell(-7, -7, 2.5, 1.3, dark);
+      ctx.strokeStyle = '#c9cfd6'; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.ellipse(-14, -7, 4.5, 3.2, 0, 0, Math.PI * 2); ctx.stroke();
+      break;
+    case 'holder':
+      poly([[-14, -5], [14, -5], [20, -9], [-8, -9]], lite); rect(-14, -5, 28, 5, base);
+      poly([[14, -5], [20, -9], [20, -4], [14, 0]], dark);
+      poly([[-6, -7], [2, -7], [12, -26], [4, -26]], base); poly([[2, -7], [5, -9], [15, -26], [12, -26]], dark);
+      rect(-14, -10, 5, 5, base); rect(-14, -10, 5, 1.5, lite);
+      break;
+    case 'dragon':
+      ell(0, -2, 14, 3, dark);
+      ctx.strokeStyle = base; ctx.lineWidth = 4; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-9, -8); ctx.quadraticCurveTo(-20, -4, -19, -13); ctx.stroke();
+      ell(0, -10, 11, 7, base); ell(-2, -12, 7, 3, lite);
+      poly([[5, -13], [10, -13], [12, -25], [8, -25]], base);
+      ell(11, -27, 6, 4, base); poly([[15, -28], [20, -26], [15, -24]], base);
+      poly([[8, -30], [7, -35], [10, -31]], dark); poly([[12, -30], [13, -35], [14, -30]], dark);
+      ell(12, -28, 1.2, 1.2, '#1b1b1b');
+      poly([[-2, -15], [-14, -31], [-7, -24], [-3, -33], [2, -24], [4, -16]], dark);
+      rect(-6, -5, 3, 5, dark); rect(4, -5, 3, 5, dark);
+      break;
+    case 'gear': {
+      rect(-10, -4, 20, 4, dark); rect(-3, -8, 6, 4, base);
+      ctx.beginPath();
+      for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2, r = (i % 2) ? 12 : 15.5; ctx.lineTo(Math.cos(a) * r, -19 + Math.sin(a) * r); }
+      ctx.closePath(); ctx.fillStyle = base; ctx.fill();
+      ell(0, -19, 9, 9, lite); ell(0, -19, 4, 4, '#20242a');
+      for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2 + 0.6; ell(Math.cos(a) * 6.5, -19 + Math.sin(a) * 6.5, 1.4, 1.4, dark); }
+      break;
+    }
+    case 'helmet':
+      ctx.beginPath(); ctx.moveTo(-17, -1); ctx.lineTo(-17, -17); ctx.arc(0, -17, 17, Math.PI, 0); ctx.lineTo(17, -1); ctx.closePath();
+      ctx.fillStyle = base; ctx.fill();
+      ell(-6, -27, 6, 4, lite);
+      fillRR(-13, -21, 26, 8, 3, '#1c232b'); rect(-9, -19.5, 7, 2, 'rgba(160,220,255,0.7)');
+      ell(-16, -9, 3, 5, dark); ell(16, -9, 3, 5, dark);
+      rect(-1, -34, 2, 12, dark); rect(-17, -3, 34, 2, dark);
+      break;
+    case 'drone':
+      ctx.strokeStyle = base; ctx.lineWidth = 3.5; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-17, -4); ctx.lineTo(17, -12); ctx.moveTo(-13, -13); ctx.lineTo(13, -3); ctx.stroke();
+      poly([[-6, -6], [5, -6], [8, -11], [-3, -11]], lite);
+      for (const [rx, ry] of [[-17, -4], [17, -12], [-13, -13], [13, -3]]) {
+        rect(rx - 2, ry - 5, 4, 5, dark);
+        ctx.strokeStyle = dark; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.ellipse(rx, ry - 5, 7, 2.2, 0, 0, Math.PI * 2); ctx.stroke();
+      }
+      break;
+  }
+  if (prog < 1 && prog > 0) {
+    // layer lines and the hot top edge
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    for (let yy = 0; yy > -h * prog; yy -= 2.5) ctx.fillRect(-30, yy, 60, 0.6);
+    rect(-30, -h * prog - 0.5, 60, 1.2, 'rgba(255,240,180,0.7)');
+  }
+  ctx.restore();
+}
+function spaghetti(cx, cy, color, sd) {
+  let h = sd * 9301 + 49297;
+  const r = () => { h = (h * 9301 + 49297) % 233280; return h / 233280; };
+  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+  for (let i = 0; i < 11; i++) {
+    const x = cx + (r() - 0.5) * 50, y = cy + (r() - 0.5) * 30, w = 2 * Math.sin(anim * 2 + i);
+    ctx.beginPath(); ctx.moveTo(x, y);
+    ctx.bezierCurveTo(x + (r() - 0.5) * 40 + w, y - r() * 30, x + (r() - 0.5) * 40, y + r() * 26, x + (r() - 0.5) * 34, y + (r() - 0.5) * 18 + w);
+    ctx.stroke();
+  }
+}
+function headFan(x, y, r) {
+  ell(x, y, r, r, '#1a1d21');
+  ctx.strokeStyle = '#7b848e'; ctx.lineWidth = 1.2;
+  for (let i = 0; i < 4; i++) { const a = anim * 12 + i * Math.PI / 2; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * r * 0.85, y + Math.sin(a) * r * 0.85); ctx.stroke(); }
+}
+function filamentLine(x0, y0, x1, y1, cx, cy, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo(cx, cy, x1, y1); ctx.stroke();
+}
+// p: { tier, status, prog, wear, cur, job, fil, slot }
+function drawPrinter(p, x, y, stockFrac) {
+  const pr = p.status === 'print', job = (p.cur || p).job, fil = (p.cur || p).fil, color = FIL_COLOR[fil];
+  const oh = OBJ_H[job], prog = pr ? p.prog : 0, a = anim + p.slot * 1.3;
+  ctx.save(); ctx.translate(x, y);
+  ell(4, -2, 70, 9, 'rgba(0,0,0,0.25)');
+  if (p.tier === 0) {
+    poly([[-56, -14], [56, -14], [66, -22], [-46, -22]], '#454b52'); rect(-56, -14, 112, 14, '#30353a');
+    poly([[56, -14], [66, -22], [66, -8], [56, 0]], '#202327');
+    rect(-50, -11, 18, 7, pr ? '#6fd3ff' : '#2c4a5a'); ell(-24, -7, 3, 3, '#9aa3ab');
+    rect(-52, -164, 7, 150, '#a8b1b9'); rect(45, -164, 7, 150, '#a8b1b9'); rect(-52, -164, 2, 150, '#c9d0d6');
+    rect(-55, -170, 110, 8, '#8d969e');
+    const off = pr ? Math.sin(a * 3.1) * 6 : 0;
+    poly([[-42 + off, -24], [42 + off, -24], [50 + off, -32], [-34 + off, -32]], '#d6dbe0'); rect(-42 + off, -24, 84, 3, '#1f2226');
+    if (pr || p.status === 'clog') drawObj(job, 4 + off, -27, 1, p.status === 'clog' ? 0.35 : prog, color);
+    const tip = -28 - oh * prog - 1, hx = pr ? Math.sin(a * 6.3) * 22 + 4 + off : 0;
+    rect(-50, tip - 17, 100, 6, '#59616a');
+    fillRR(hx - 10, tip - 24, 20, 19, 3, '#2a2e33'); headFan(hx, tip - 15, 6);
+    poly([[hx - 4, tip - 5], [hx + 4, tip - 5], [hx, tip]], '#d4a017');
+    rect(36, -192, 4, 24, '#8d969e'); drawSpool(38, -198, 15, color, stockFrac);
+    filamentLine(38, -186, hx, tip - 24, 70, -150, color);
+    if (p.status === 'clog') spaghetti(hx, tip - 2, color, p.slot + 1);
+  } else if (p.tier === 1) {
+    poly([[-62, -12], [62, -12], [74, -22], [-50, -22]], '#34383d'); rect(-62, -12, 124, 12, '#24272b');
+    poly([[62, -12], [74, -22], [74, -10], [62, 0]], '#17191c');
+    rect(-16, -9, 32, 6, pr ? '#5ad1ff' : '#24485a');
+    ctx.strokeStyle = '#4a5057'; ctx.lineWidth = 3; ctx.strokeRect(-48, -180, 120, 158);
+    ctx.beginPath(); ctx.moveTo(-60, -170); ctx.lineTo(-48, -180); ctx.moveTo(60, -170); ctx.lineTo(72, -180); ctx.moveTo(60, -22); ctx.lineTo(72, -22); ctx.stroke();
+    rect(-40, -164, 3, 142, '#8d969e'); rect(37, -164, 3, 142, '#8d969e');
+    const bedY = pr ? -132 + oh * prog : p.status === 'clog' ? -110 : -70;
+    poly([[-46, bedY], [46, bedY], [56, bedY - 10], [-36, bedY - 10]], '#cfd4da'); rect(-46, bedY, 92, 3, '#2a2d31');
+    if (pr || p.status === 'clog') drawObj(job, 4, bedY - 3, 1, p.status === 'clog' ? 0.4 : prog, color);
+    rect(-58, -158, 116, 5, '#6b737c');
+    const hx = pr ? Math.sin(a * 5) * 30 + 4 : 0;
+    fillRR(hx - 12, -156, 24, 20, 3, '#e6e9ec'); headFan(hx, -146, 6); rect(hx - 12, -156, 24, 3, '#f08a2c');
+    poly([[hx - 4, -136], [hx + 4, -136], [hx, -131]], '#d4a017');
+    ctx.strokeStyle = '#1d2024'; ctx.lineWidth = 6; ctx.strokeRect(-60, -170, 120, 152);
+    rect(-74, -124, 14, 4, '#6b737c'); drawSpool(-84, -122, 15, color, stockFrac);
+    filamentLine(-84, -137, hx, -156, -60, -200, color);
+    text('PRO', 44, -6, 7, '#f08a2c', 'center', 'bold');
+    if (p.status === 'clog') spaghetti(hx, bedY - 26, color, p.slot + 3);
+  } else {
+    poly([[-70, -186], [70, -186], [86, -198], [-54, -198]], '#f0f2f4'); rect(-70, -186, 140, 186, '#dde1e5');
+    poly([[70, -186], [86, -198], [86, -12], [70, 0]], '#b4bac1');
+    const sc = p.status === 'clog' ? '#e5484d' : p.wear >= tune.wear_warn ? '#f39a2b' : pr ? '#4cc36a' : '#7b848e';
+    rect(-50, -195, 80, 5, sc);
+    rect(-62, -176, 98, 124, '#1b2730');
+    ctx.save(); ctx.beginPath(); ctx.rect(-62, -176, 98, 124); ctx.clip();
+    rect(-58, -166, 90, 4, '#6b737c');
+    const bedY = pr ? -146 + oh * prog : p.status === 'clog' ? -120 : -80;
+    poly([[-50, bedY], [30, bedY], [38, bedY - 8], [-42, bedY - 8]], '#cfd4da');
+    if (pr || p.status === 'clog') drawObj(job, -10, bedY - 2, 1, p.status === 'clog' ? 0.4 : prog, color);
+    const hx = pr ? Math.sin(a * 7) * 28 - 10 : -10;
+    fillRR(hx - 11, -164, 22, 16, 3, '#2f3439'); headFan(hx, -156, 5);
+    poly([[hx - 3, -148], [hx + 3, -148], [hx, -145]], '#d4a017');
+    if (p.status === 'clog') spaghetti(hx, bedY - 24, color, p.slot + 5);
+    ctx.restore();
+    rect(-62, -176, 98, 124, 'rgba(150,205,240,0.18)');
+    poly([[-50, -176], [-30, -176], [-62, -120], [-62, -150]], 'rgba(255,255,255,0.16)');
+    ctx.strokeStyle = '#9aa1a8'; ctx.lineWidth = 3; ctx.strokeRect(-62, -176, 98, 124);
+    rect(42, -172, 22, 16, pr ? '#5ad1ff' : '#24485a'); rect(44, -150, 8, 5, '#4cc36a'); rect(54, -150, 8, 5, '#e5484d');
+    rect(42, -138, 22, 70, '#c9ced4'); for (let i = 0; i < 6; i++) rect(45, -132 + i * 10, 16, 2, '#9aa1a8');
+    rect(-62, -44, 98, 30, '#c4c9cf'); rect(-54, -38, 44, 12, '#262b31');
+    rect(-52, -36, 40 * clamp(stockFrac, 0, 1), 8, color); rect(4, -32, 26, 4, '#8d949b');
+    rect(-66, 0, 12, 4, '#3a3f45'); rect(54, 0, 12, 4, '#3a3f45');
+    text('INDUSTRIE', -13, -6, 7, '#5f6770', 'center', 'bold');
+  }
+  ctx.restore();
+}
+function topOf(p) { return p.tier === 0 ? -214 : p.tier === 1 ? -184 : -202; }
+function bubble(x, y, s, c) {
+  ctx.font = `bold 12px ${FONT}`; const w = ctx.measureText(s).width + 16;
+  fillRR(x - w / 2, y - 12, w, 22, 8, c); poly([[x - 6, y + 9], [x + 6, y + 9], [x, y + 16]], c);
+  text(s, x, y - 1, 12, '#fff', 'center', 'bold');
+}
+function wrenchIcon(x, y, c) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(-0.7);
+  rect(-1.5, -2, 3, 9, c); ctx.beginPath(); ctx.arc(0, -5, 4, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); rect(-1.2, -10, 2.4, 5, '#00000055');
+  ctx.restore();
+}
+
+// ---- Drawing: the workshop ---------------------------------------------------------------------
+function drawWall() {
+  rect(0, 56, 830, 180, '#dcccb0'); rect(0, 56, 830, 10, '#c9b897');
+  // pegboard with tools
+  fillRR(28, 80, 292, 140, 4, '#c39a62');
+  for (let yy = 90; yy < 214; yy += 12) for (let xx = 38; xx < 314; xx += 12) rect(xx, yy, 2, 2, '#8a6a42');
+  // wrench
+  ctx.save(); ctx.translate(60, 140); ctx.rotate(0.15); rect(-3, -40, 6, 74, '#9aa3ab'); ell(0, -42, 9, 9, '#9aa3ab'); rect(-3, -52, 6, 12, '#c39a62'); ctx.restore();
+  // pliers
+  ctx.strokeStyle = '#d0473d'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(98, 190); ctx.lineTo(108, 136); ctx.moveTo(122, 190); ctx.lineTo(112, 136); ctx.stroke();
+  poly([[106, 138], [114, 138], [112, 110], [108, 110]], '#8d969e');
+  // spatula
+  rect(146, 120, 5, 70, '#3a3f45'); poly([[140, 98], [157, 98], [154, 122], [143, 122]], '#c9d0d6');
+  // hex keys
+  ctx.strokeStyle = '#2f3439'; ctx.lineWidth = 3;
+  for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.moveTo(180 + i * 9, 104); ctx.lineTo(180 + i * 9, 150 + i * 8); ctx.lineTo(190 + i * 9, 150 + i * 8); ctx.stroke(); }
+  // spare spools
+  drawSpool(256, 120, 18, '#e5484d', 0.8); drawSpool(292, 120, 14, '#f5f5f0', 0.6); drawSpool(270, 178, 16, '#2b2b2b', 0.7);
+  // window
+  const g = ctx.createLinearGradient(0, 82, 0, 182); g.addColorStop(0, '#8fcbef'); g.addColorStop(1, '#e8f4fb');
+  rect(346, 82, 104, 100, '#7a5a3a'); ctx.fillStyle = g; ctx.fillRect(352, 88, 92, 88);
+  ell(372, 160, 16, 6, '#9bd18b'); ell(420, 166, 22, 7, '#8cc77a');
+  rect(396, 88, 4, 88, '#7a5a3a'); rect(352, 130, 92, 4, '#7a5a3a'); rect(342, 180, 112, 6, '#8d6a45');
+  // sales shelf
+  fillRR(650, 100, 150, 28, 4, '#7a5a3a'); text('VERKAUF', 725, 114, 15, '#ffe2a8', 'center', 'bold');
+  rect(486, SHELF_Y, 322, 8, '#8d6a45'); rect(486, SHELF_Y + 8, 322, 3, '#6b4f33');
+  rect(500, SHELF_Y + 10, 6, 16, '#6b4f33'); rect(788, SHELF_Y + 10, 6, 16, '#6b4f33');
+  rect(486, 140, 322, 6, '#8d6a45'); rect(500, 146, 6, 12, '#6b4f33'); rect(788, 146, 6, 12, '#6b4f33');
+  // boxes on the upper shelf
+  for (let i = 0; i < 5; i++) { const bx = 500 + i * 62; poly([[bx, 140], [bx + 34, 140], [bx + 42, 132], [bx + 8, 132]], '#d9b07a'); rect(bx, 116 + 24 - 24, 34, 24, '#c79a5f'); rect(bx + 14, 116, 6, 24, '#e6c99a'); }
+  state.shelf.forEach((s, i) => {
+    const pop = Math.min(1, s.t * 6);
+    drawObj(s.id, 505 + i * 39, SHELF_Y, 0.8 * (0.6 + 0.4 * pop), 1, s.c);
+  });
+  // baseboard + floor
+  rect(0, 232, 830, 8, '#8d6a45');
+  rect(0, 240, 830, 480, '#ad7d4c');
+  for (let r = 0, yy = 240; yy < 720; r++, yy += 28) {
+    rect(0, yy, 830, 1.5, '#86592f');
+    if (r % 2) rect(0, yy + 1.5, 830, 26.5, 'rgba(0,0,0,0.04)');
+    for (let xx = (r % 3) * 70 + 40; xx < 830; xx += 210) rect(xx, yy, 1.5, 28, '#8f6236');
+  }
+  const sh = ctx.createLinearGradient(0, 240, 0, 300); sh.addColorStop(0, 'rgba(0,0,0,0.25)'); sh.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = sh; ctx.fillRect(0, 240, 830, 60);
+}
+function drawBench(x0, ty, sel, ghost) {
+  const w = BW, d = BD, s = BS;
+  if (ghost) {
+    ctx.save(); ctx.globalAlpha = 0.5;
+  }
+  rect(x0 + 6, ty + 22, 8, 44, '#3e444a'); rect(x0 + w - 14, ty + 22, 8, 44, '#3e444a'); rect(x0 + w + s - 10, ty - d + 22, 6, 40, '#33383d');
+  rect(x0 + 8, ty + 50, w - 16, 4, '#3e444a');
+  poly([[x0 + w, ty], [x0 + w + s, ty - d], [x0 + w + s, ty - d + 22], [x0 + w, ty + 22]], '#59616a');
+  poly([[x0, ty], [x0 + w, ty], [x0 + w + s, ty - d], [x0 + s, ty - d]], sel ? '#b3c9dc' : '#9ca5ad');
+  rect(x0, ty, w, 22, '#6b737c'); rect(x0, ty, w, 2, '#8a939b');
+  if (ghost) ctx.restore();
+  if (sel) { poly([[x0 - 3, ty + 3], [x0 + w + 3, ty + 3], [x0 + w + s + 3, ty - d - 3], [x0 + s - 3, ty - d - 3]], null); ctx.strokeStyle = '#5ab0ff'; ctx.lineWidth = 3; ctx.stroke(); }
+}
+function statusOf(p) {
+  switch (p.status) {
+    case 'print': return { s: `Druckt ${pct(p.prog)}`, c: '#4cc36a' };
+    case 'maint': return { s: `Wartung ${pct(p.timer / tune.maint_time)}`, c: '#5ab0ff' };
+    case 'repair': return { s: `Reparatur ${pct(p.timer / tune.repair_time)}`, c: '#5ab0ff' };
+    case 'clog': return { s: 'VERSTOPFT', c: '#e5484d' };
+    case 'wait': return { s: p.why || 'Wartet', c: '#f39a2b' };
+    default: return { s: p.auto ? 'Bereit' : 'Aus', c: '#aab3bd' };
+  }
+}
+function drawSlots() {
+  const wm = mouse.in && inFloor(mouse) ? toWorld(mouse.x, mouse.y) : null;
+  const hoverSlot = wm ? [4, 5, 6, 7, 0, 1, 2, 3].find(i => inSlot(i, wm)) : undefined;
+  const hint = hintNow();
+  for (let i = 0; i < 8; i++) {
+    const sp = slotPos(i), idx = state.printers.findIndex(p => p.slot === i), p = state.printers[idx];
+    const isSel = idx === state.sel && idx >= 0;
+    drawBench(sp.x0, sp.ty, isSel, !p);
+    if (p) {
+      if (p.wear >= tune.wear_warn && p.status !== 'clog') ell(sp.bx, sp.by - 4, 72, 12, `rgba(243,154,43,${0.25 + 0.15 * Math.sin(anim * 5)})`);
+      if (p.status === 'clog') ell(sp.bx, sp.by - 4, 72, 12, 'rgba(229,72,77,0.4)');
+      drawPrinter(p, sp.bx, sp.by, state.stock[(p.cur || p).fil] / tune.pack_grams);
+      // name plate and wear bar on the bench front
+      text(`#${i + 1} ${TIER_NAME[p.tier]}`, sp.x0 + 8, sp.ty + 11, 12, '#f1f4f7', 'left', 'bold');
+      const wc = p.wear >= tune.wear_warn ? (p.wear >= tune.wear_clog_start ? '#e5484d' : '#f39a2b') : '#4cc36a';
+      bar(sp.x0 + 92, sp.ty + 7, 66, 8, p.wear / 100, wc, '#3a3f45');
+      const st = statusOf(p), top = sp.by + topOf(p) - 12;
+      if (p.status === 'clog') bubble(sp.bx, top, 'Verstopft! Reparieren', '#c9343a');
+      else if (p.status === 'maint' || p.status === 'repair') bubble(sp.bx, top, st.s, '#2d6cad');
+      else if (p.status === 'wait') bubble(sp.bx, top, st.s, '#a8641c');
+      else if (p.wear >= tune.wear_warn) bubble(sp.bx, top, `Verschleiß ${Math.round(p.wear)} %: Wartung!`, '#c8741a');
+      else if (!p.auto && p.status === 'idle') bubble(sp.bx, top, 'Aus: „Start“ klicken', '#59636f');
+      if (p.maintQueued) { ell(sp.x0 + 150, sp.ty - 40, 11, 11, '#2d6cad'); wrenchIcon(sp.x0 + 150, sp.ty - 40, '#fff'); }
+    } else {
+      const price = nextPrice(), can = state.money >= price, full = state.printers.length >= 8;
+      if (!full && hoverSlot === i) {
+        ctx.save(); ctx.globalAlpha = 0.45; drawPrinter({ tier: 0, status: 'idle', prog: 0, wear: 0, job: 'key', fil: 'cheap', slot: i }, sp.bx, sp.by, 0.6); ctx.restore();
+        bubble(sp.bx, sp.by - 230, `Drucker kaufen: ${eur(price)}`, can ? '#2f9e55' : '#59636f');
+      }
+      if (!full) {
+        const pulse = hint && hint.id === 'slot' && can;
+        fillRR(sp.x0 + 18, sp.ty + 2, BW - 36, 18, 6, pulse ? `rgba(47,158,85,${0.75 + 0.25 * Math.sin(anim * 7)})` : can ? '#2b6e40' : '#2a2f37');
+        text(`Platz frei · ${eur(price)}`, sp.x0 + BW / 2, sp.ty + 11, 12, can ? '#e9fbe9' : '#c3c9cf', 'center', 'bold');
+      }
+    }
+  }
+  // flying sold items
+  for (const f of state.flying) {
+    const t = f.t, x = f.x0 + (f.x1 - f.x0) * t, y = f.y0 + (f.y1 - f.y0) * t - Math.sin(t * Math.PI) * 90;
+    drawObj(f.id, x, y, 0.9, 1, f.c);
+  }
+  for (const f of state.fx) {
+    ctx.globalAlpha = clamp(1.4 - f.t / f.life * 1.4, 0, 1);
+    ctx.font = `bold 17px ${FONT}`; ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(20,20,20,0.7)'; ctx.textAlign = 'center';
+    ctx.strokeText(f.s, f.x, f.y); text(f.s, f.x, f.y, 17, f.c, 'center', 'bold'); ctx.globalAlpha = 1;
+  }
+}
+function drawFloorView() {
+  ctx.save(); ctx.beginPath(); ctx.rect(FX0, FY0, FW, FH); ctx.clip();
+  ctx.translate(FCX, FCY); ctx.scale(cam.zoom, cam.zoom); ctx.translate(-cam.cx, -cam.cy);
+  drawWall(); drawSlots();
+  ctx.restore();
+  // ledger chips (screen space)
+  state.ledger.slice(0, 3).forEach((l, i) => {
+    const x = 10 + i * 272, y = 684;
+    fillRR(x, y, 264, 28, 6, 'rgba(25,28,33,0.82)');
+    const c = l.amt > 0 ? '#7ee08f' : l.amt < 0 ? '#ff8a8a' : '#f3b25b';
+    text(l.amt === 0 ? '±0 €' : (l.amt > 0 ? '+' : '') + eur(l.amt), x + 10, y + 14, 13, c, 'left', 'bold');
+    ctx.font = `12px ${FONT}`; let s = l.text; while (ctx.measureText(s).width > 170 && s.length > 4) s = s.slice(0, -2);
+    if (s !== l.text) s += '…';
+    text(s, x + 84, y + 14, 12, '#d6dce2', 'left');
+  });
+  // hint or goal banner
+  const b = state.banner, h = hintNow();
+  const show = b ? { s: b.s, c: b.c } : h ? { s: h.s, c: h.id === 'warn' ? '#b3262c' : '#2a3442' } : null;
+  if (show) {
+    ctx.font = `bold 15px ${FONT}`; const w = Math.min(800, ctx.measureText(show.s).width + 40);
+    const k = b ? 1 : 0.85 + 0.15 * Math.sin(anim * 5);
+    ctx.globalAlpha = k; fillRR(FCX - w / 2, 60, w, 30, 10, show.c); ctx.globalAlpha = 1;
+    text(show.s, FCX, 75, 15, '#fff', 'center', 'bold');
+  }
+}
+
+// ---- Drawing: HUD and side panel -------------------------------------------------------------
+function drawHUD() {
+  rect(0, 0, W, 56, '#1f2329'); rect(0, 55, W, 1, '#353b44');
+  text(eur(state.money), 18, 28, 28, state.money < 0 ? '#ff6b6b' : '#7ee08f', 'left', 'bold');
+  text(`Tag ${state.day}`, 196, 20, 15, '#f1f4f7', 'left', 'bold');
+  bar(196, 34, 130, 8, state.dayT / tune.day_length, '#f3c75b');
+  if (state.warn) text('MAHNUNG: Tag im Plus beenden!', 344, 28, 14, '#ff6b6b', 'left', 'bold');
+  else text(`Miete + Strom heute: ${eur(rentToday())}`, 344, 28, 14, '#c6cdd5', 'left');
+  const outT = Object.values(state.today.out).reduce((a, b) => a + b, 0);
+  text(`Heute: +${eur(state.today.inc)}`, 600, 20, 13, '#7ee08f', 'left', 'bold');
+  text(`ausgegeben ${eur(outT)}`, 600, 38, 13, '#ff9b9b', 'left');
+  text('Klick: wählen / kaufen · Mausrad: Zoom · 1-8 Drucker · Leertaste Start', 1268, 20, 12, '#9aa5b1', 'right');
+  text('W Wartung · R Reparieren · F Filament · B Drucker · P Pause · M Ton' + (muted ? ' (aus)' : ''), 1268, 38, 12, '#9aa5b1', 'right');
+}
+function card(x, y, w, h, title) {
+  fillRR(x, y, w, h, 8, '#2c323a'); text(title, x + 12, y + 14, 14, '#ffd98a', 'left', 'bold');
+}
+function spoolIcon(f) { return (x, y) => drawSpool(x, y, 10, FIL_COLOR[f], 0.8); }
+function drawPanel() {
+  rect(830, 56, 450, 664, '#22272e');
+  const hint = hintNow();
+  // Lager
+  card(838, 62, 436, 158, 'Filament-Lager');
+  text(`Pack = ${tune.pack_grams} g`, 1262, 76, 12, '#9aa5b1', 'right');
+  FIL.forEach((f, i) => {
+    const y = 88 + i * 32, d = filDef(f), un = filUnlocked(f);
+    drawSpool(858, y + 13, 11, d.color, Math.min(1, state.stock[f] / tune.pack_grams));
+    text(d.name, 876, y + 6, 13, un ? '#f1f4f7' : '#7d8794', 'left', 'bold');
+    text(`Fehler ${Math.round(d.fail * 100)} % · Wert ×${num(d.value)}`, 876, y + 21, 12, '#9aa5b1', 'left');
+    const low = state.stock[f] < 60 && un;
+    text(`${Math.round(state.stock[f])} g`, 1080, y + 13, 14, low ? '#ffb15e' : '#f1f4f7', 'right', 'bold');
+    if (un) button(1094, y, 172, 27, `Kaufen  ${eur(d.price)}`, () => buyFil(f), { enabled: state.money >= d.price, pulse: hint && hint.id === 'buyfil' && (f === 'cheap' || f === 'plus'), size: 13 });
+    else text(f === 'petg' ? 'braucht Pro-Drucker' : 'braucht Industrie', 1180, y + 13, 12, '#7d8794', 'center');
+  });
+  // Selected printer
+  const p = state.printers[state.sel];
+  card(838, 226, 436, 330, `Drucker #${p.slot + 1} · ${TIER_NAME[p.tier]}`);
+  const td = tierDef(p.tier), st = statusOf(p);
+  text(st.s, 1262, 240, 13, st.c, 'right', 'bold');
+  const wc = p.wear >= tune.wear_warn ? (p.wear >= tune.wear_clog_start ? '#e5484d' : '#f39a2b') : '#4cc36a';
+  text(`Verschleiß ${Math.round(p.wear)} %`, 850, 262, 12, '#c6cdd5', 'left');
+  bar(960, 257, 302, 10, p.wear / 100, wc);
+  text(`Tempo ×${num(td.speed)} · Verschleiß ${num(td.wear)} %/s · ab ${tune.wear_clog_start} % Gefahr: Verstopfung`, 850, 280, 12, '#9aa5b1', 'left');
+  text('Druckauftrag (läuft in Schleife)', 850, 300, 12, '#c6cdd5', 'left', 'bold');
+  OBJ.forEach((o, i) => {
+    const d = objDef(o), x = 846 + (i % 2) * 212, y = 310 + Math.floor(i / 2) * 44;
+    const owned = state.plans[o], tierOk = d.tier <= p.tier;
+    let sub, en = true, subC;
+    const f = filDef(p.fil);
+    if (!owned) { sub = `Bauplan kaufen: ${eur(d.plan)}`; en = state.money >= d.plan; subC = '#ffd98a'; }
+    else if (!tierOk) { sub = `braucht ${TIER_NAME[d.tier]}-Drucker`; en = false; }
+    else sub = `${eur(d.price * f.value)} · ${d.g} g · ${num(d.time / td.speed)} s`;
+    button(x, y, 206, 40, d.name, () => chooseJob(p, o), { sub, enabled: en, active: owned && p.job === o, subC, icon: (ix, iy) => drawObj(o, ix, iy + 11, 0.62, 1, owned ? f.color : '#6c7682') });
+  });
+  text('Filament für diesen Drucker', 850, 448, 12, '#c6cdd5', 'left', 'bold');
+  FIL.forEach((f, i) => {
+    const ok = FIL_TIER[f] <= p.tier;
+    button(846 + i * 106, 458, 100, 30, FIL_SHORT[f], () => chooseFil(p, f), { enabled: ok, active: p.fil === f, icon: spoolIcon(f) });
+  });
+  const by = 500;
+  const runLabel = p.auto ? 'Stopp' : 'Start';
+  button(846, by, 92, 46, runLabel, () => toggleRun(p), { bg: p.auto ? '#7a3b3b' : '#2f8a4c', pulse: hint && hint.id === 'start' && state.printers.indexOf(p) === state.sel && !p.auto, size: 15, sub: p.auto ? 'Schleife an' : 'Schleife aus' });
+  const mOk = p.status !== 'clog' && p.status !== 'maint' && p.status !== 'repair' && state.money >= td.maint;
+  button(944, by, 104, 46, p.maintQueued ? 'Wartung geplant' : 'Wartung', () => doMaint(p), { sub: eur(td.maint) + (p.status === 'print' ? ' · nach Druck' : ''), enabled: mOk, pulse: hint && hint.id === 'maint', active: p.maintQueued });
+  button(1054, by, 104, 46, 'Reparieren', () => doRepair(p), { sub: eur(td.repair), enabled: p.status === 'clog' && state.money >= td.repair, pulse: hint && hint.id === 'repair' && p.status === 'clog', bg: p.status === 'clog' ? '#9a3036' : undefined });
+  if (p.tier < 2) {
+    const upOk = state.money >= td.upgrade && !busy(p);
+    button(1164, by, 104, 46, `Auf ${TIER_NAME[p.tier + 1]}`, () => doUpgrade(p), { sub: busy(p) ? 'erst stoppen' : eur(td.upgrade), enabled: upOk, bg: '#6a4a9a' });
+  } else text('Höchste Stufe', 1216, by + 23, 12, '#9aa5b1', 'center');
+  // Goals
+  card(838, 562, 436, 152, 'Ziele');
+  const rows = [['Jetzt', goal(state.ms)], ['Nächstes', goal(state.ms + 1)], ['Groß', bigGoal(state.big)]];
+  rows.forEach(([lab, g], i) => {
+    const y = 586 + i * 42, pr = g.p(), near = pr >= 0.75 && pr < 1 && i !== 1;
+    text(lab, 850, y + 6, 12, i === 0 ? '#ffd98a' : '#9aa5b1', 'left', 'bold');
+    text(g.t(), 920, y + 6, 13, '#f1f4f7', 'left', i === 0 ? 'bold' : '');
+    text(`+${eur(g.r)}`, 1262, y + 6, 12, '#7ee08f', 'right', 'bold');
+    const c = near ? `rgba(255,209,102,${0.7 + 0.3 * Math.sin(anim * 8)})` : '#4cc36a';
+    bar(920, y + 18, 270, 8, pr, i === 1 ? '#6d7886' : c);
+    text(near ? 'fast geschafft!' : pct(pr), 1262, y + 22, 12, near ? '#ffd166' : '#9aa5b1', 'right', near ? 'bold' : '');
+  });
+  for (const c of state.confetti) {
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); rect(-4, -2, 8, 4, c.c); ctx.restore();
+  }
+}
+
+// ---- Scenes ----------------------------------------------------------------------------------
+function drawPlay() { ui = []; clear('#15181c'); drawFloorView(); drawHUD(); drawPanel(); }
+function overlay(x, y, w, h) { rect(0, 0, W, H, 'rgba(10,12,15,0.6)'); fillRR(x, y, w, h, 14, '#262c34'); rr(x, y, w, h, 14); ctx.strokeStyle = '#4a5260'; ctx.lineWidth = 2; ctx.stroke(); }
+const demoP = { tier: 1, status: 'print', prog: 0, wear: 20, job: 'dragon', fil: 'petg', slot: 2, cur: { job: 'dragon', fil: 'petg' } };
+const scenes = {
+  figures: {
+    update(dt) { state.t += dt; },
+    draw() {
+      ui = []; clear('#2a2f36'); rect(0, 380, W, 340, '#ad7d4c');
+      text('Druckfarm: alle Figuren', W / 2, 30, 22, '#fff', 'center', 'bold');
+      const ps = [
+        [{ tier: 0, status: 'print', prog: 0.6, wear: 10, job: 'key', fil: 'cheap', slot: 0, cur: { job: 'key', fil: 'cheap' } }, 'Starter-Drucker'],
+        [{ tier: 1, status: 'print', prog: 0.6, wear: 10, job: 'holder', fil: 'plus', slot: 1, cur: { job: 'holder', fil: 'plus' } }, 'Pro-Drucker'],
+        [{ tier: 2, status: 'print', prog: 0.6, wear: 10, job: 'drone', fil: 'resin', slot: 2, cur: { job: 'drone', fil: 'resin' } }, 'Industrie-Drucker'],
+        [{ tier: 0, status: 'clog', prog: 0, wear: 100, job: 'dragon', fil: 'plus', slot: 3 }, 'Verstopft (Spaghetti)'],
+      ];
+      ps.forEach(([p, n], i) => { const x = 170 + i * 310; drawPrinter(p, x, 330, 0.7); text(n, x, 356, 16, '#fff', 'center', 'bold'); });
+      OBJ.forEach((o, i) => { const x = 120 + i * 205; drawObj(o, x, 520, 2.4, 1, FIL_COLOR[FIL[i % 4]]); text(OBJ_NAME[o], x, 548, 15, '#fff', 'center', 'bold'); });
+      FIL.forEach((f, i) => { const x = 250 + i * 260; drawSpool(x, 630, 26, FIL_COLOR[f], 0.8); text(FIL_NAME[f] + '-Spule', x, 678, 15, '#fff', 'center', 'bold'); });
+    },
+  },
+  title: {
+    update() {
+      handleClicks();
+      if (pressed('Enter') || pressed('Space')) { const s = loadSave(); if (s) continueGame(s); else { reset(); scene = 'play'; } }
+      if (pressed('KeyN')) { clearSave(); reset(); scene = 'play'; }
+    },
+    draw() {
+      ui = [];
+      const st = state; drawWall(); state = st;
+      rect(0, 0, W, H, 'rgba(0,0,0,0)');
+      rect(830, 56, 450, 664, '#ad7d4c'); rect(0, 0, W, 56, '#1f2329');
+      demoP.prog = (anim / 14) % 1; drawBench(470, 600, false, false); drawPrinter(demoP, slotPos(4).bx + 440, 587, 0.8);
+      fillRR(60, 300, 520, 360, 16, 'rgba(24,28,34,0.9)');
+      text(TITLE, 320, 350, 56, '#ffd98a', 'center', 'bold');
+      text('Ein 3D-Drucker-Business von der Garage zur Farm', 320, 392, 16, '#d6dce2');
+      const lines = ['Filament kaufen: billig = mehr Fehldrucke, gut = mehr Wert', 'Drucken und verkaufen geht automatisch in Schleife', 'Verschleiß im Blick: Wartung ist billig, Verstopfung teuer', 'Mehr Drucker, bessere Drucker, neue Baupläne', 'Miete am Tagesende: zweimal im Minus = Pleite'];
+      lines.forEach((l, i) => text(l, 90, 432 + i * 24, 14, '#c6cdd5', 'left'));
+      const s = loadSave();
+      button(90, 568, 210, 50, 'Neues Spiel', () => { clearSave(); reset(); scene = 'play'; }, { bg: '#2f8a4c', size: 17, sub: 'Enter / Klick' });
+      if (s) button(320, 568, 230, 50, `Weiter: Tag ${s.day}`, () => continueGame(s), { bg: '#2d6cad', size: 17, sub: eur(s.money) });
+      text('Steuerung: Maus (klicken, Mausrad zoomt) · Tasten im Spiel unten rechts erklärt', 320, 640, 12, '#9aa5b1');
+    },
+  },
+  play: {
+    update(dt) {
+      if (pressed('KeyP') || pressed('Escape')) { scene = 'pause'; return; }
+      handleClicks();
+      const p = state.printers[state.sel];
+      for (let i = 1; i <= 8; i++) if (pressed('Digit' + i)) { const idx = state.printers.findIndex(q => q.slot === i - 1); if (idx >= 0) state.sel = idx; }
+      if (pressed('Space')) toggleRun(p);
+      if (pressed('KeyW')) doMaint(p);
+      if (pressed('KeyR')) doRepair(p);
+      if (pressed('KeyF')) buyFil(p.fil);
+      if (pressed('KeyU')) doUpgrade(p);
+      if (pressed('KeyB')) { for (let i = 0; i < 8; i++) if (!state.printers.some(q => q.slot === i)) { buyPrinter(i); break; } }
+      updatePlay(dt);
+    },
+    draw: drawPlay,
+  },
+  pause: {
+    update() { handleClicks(); if (pressed('KeyP') || pressed('Escape')) scene = 'play'; },
+    anyClick() { scene = 'play'; },
+    draw() { drawPlay(); ui = []; overlay(440, 280, 400, 140); text('Pause', 640, 330, 40, '#fff', 'center', 'bold'); text('P oder Klick: weiter', 640, 380, 16, '#c6cdd5'); },
+  },
+  summary: {
+    update() { handleClicks(); if (pressed('Enter') || pressed('Space')) scene = 'play'; },
+    draw() {
+      drawPlay(); ui = [];
+      const s = state.summary; overlay(360, 120, 560, 480);
+      text(`Tag ${s.day} vorbei`, 640, 160, 30, '#ffd98a', 'center', 'bold');
+      text('Einnahmen', 400, 205, 15, '#7ee08f', 'left', 'bold'); text('+' + eur(s.inc), 880, 205, 15, '#7ee08f', 'right', 'bold');
+      let y = 236;
+      text('Ausgaben', 400, y, 15, '#ff9b9b', 'left', 'bold'); y += 26;
+      for (const [k, v] of Object.entries(s.out)) { if (v <= 0) continue; text(k, 420, y, 14, '#d6dce2', 'left'); text('−' + eur(v).replace('−', ''), 880, y, 14, '#ff9b9b', 'right'); y += 22; }
+      text('Miete + Strom', 420, y, 14, '#d6dce2', 'left'); text('−' + eur(s.rent), 880, y, 14, '#ff9b9b', 'right'); y += 30;
+      rect(400, y - 12, 480, 1, '#4a5260');
+      text('Gewinn heute', 400, y + 4, 17, '#fff', 'left', 'bold'); text((s.profit >= 0 ? '+' : '') + eur(s.profit), 880, y + 4, 17, s.profit >= 0 ? '#7ee08f' : '#ff6b6b', 'right', 'bold');
+      y += 36;
+      text(`Verkauft: ${s.prints - s.fails} · Fehldrucke: ${s.fails} · Verstopfungen: ${s.clogs}`, 640, y, 14, '#c6cdd5'); y += 26;
+      text(`Kasse jetzt: ${eur(state.money)} · Miete morgen: ${eur(rentToday())}`, 640, y, 14, '#c6cdd5');
+      if (s.warn) text('MAHNUNG: Du bist im Minus. Beende den nächsten Tag im Plus, sonst Pleite!', 640, 528, 14, '#ff6b6b', 'center', 'bold');
+      else text('Gespeichert.', 640, 528, 13, '#9aa5b1');
+      button(540, 548, 200, 40, 'Weiter', () => { scene = 'play'; }, { bg: '#2f8a4c', size: 16 });
+    },
+  },
+  over: {
+    update() { handleClicks(); if (pressed('KeyR') || pressed('Enter')) { reset(); scene = 'play'; } },
+    draw() {
+      drawPlay(); ui = [];
+      overlay(340, 200, 600, 300);
+      text('Pleite!', 640, 250, 48, '#ff6b6b', 'center', 'bold');
+      text(state.overReason, 640, 305, 15, '#f1f4f7');
+      text(state.gained, 640, 340, 15, '#c6cdd5');
+      text(`Gedruckt: ${state.stats.prints} · Fehldrucke: ${state.stats.fails} · Verstopfungen: ${state.stats.clogs} · Wartungen: ${state.stats.maint}`, 640, 370, 13, '#9aa5b1');
+      button(520, 410, 240, 50, 'Neue Werkstatt', () => { reset(); scene = 'play'; }, { bg: '#2f8a4c', size: 17, sub: 'R / Enter / Klick' });
+    },
+  },
+};
+
+// ---- Loop: fixed step, frame time clamped ---------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  anim += STEP;
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1;
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP;
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+// ---- What a check can read and drive (?manual=1 stops the loop; players never see it) ----
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; },
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }
+</script>
+</body>
+</html>
