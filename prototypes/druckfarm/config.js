@@ -9,7 +9,7 @@ window.CONFIG = {
 
   // --- Start ---
   start_money:    { value: 50,  min: 0, max: 500, step: 5 },   // € at the start of a run
-  start_filament: { value: 120, min: 0, max: 1000, step: 10 }, // g of Billig-PLA loaded at the start
+  start_filament: { value: 120, min: 0, max: 1000, step: 10 }, // g of Billig-PLA on printer #1's spool at the start
 
   // --- Day, rent, bankruptcy ---
   day_length:       { value: 90,   min: 30, max: 300, step: 5 },     // s per day
@@ -78,4 +78,26 @@ window.CONFIG = {
   // --- Goals ---
   daily_goal_base: { value: 1000, min: 100, max: 20000, step: 100 }, // € for the first endless daily goal
   big_goal_reward: { value: 0.1,  min: 0, max: 0.5, step: 0.01 },    // share of a big goal paid as reward
+
+  // --- Player (walking, like a Roblox character) ---
+  walk_speed:     { value: 190, min: 60, max: 400, step: 10 },  // px/s
+  interact_range: { value: 62,  min: 30, max: 140, step: 2 },   // px from a station's prompt point
+
+  // --- Spool per printer ---
+  spool_max: { value: 1000, min: 250, max: 3000, step: 50 },    // g a printer's spool holder takes
+
+  // --- Automation per printer (bought at the printer) ---
+  auto_maint_price: { value: 180, min: 0, max: 3000, step: 10 },  // € Wartungs-Roboter
+  auto_maint_at:    { value: 55,  min: 10, max: 95, step: 1 },    // % wear at which the robot maintains
+  auto_feed_price:  { value: 220, min: 0, max: 3000, step: 10 },  // € Filament-Zuführung (buys a pack when the spool runs low)
+
+  // --- Storage, packing, shipping ---
+  store_cap:       { value: 16,  min: 2, max: 200, step: 1 },     // items the storage rack holds at the start
+  store_cap_add:   { value: 16,  min: 1, max: 200, step: 1 },     // items each rack upgrade adds
+  store_up_price:  { value: 150, min: 0, max: 5000, step: 10 },   // € first rack upgrade (doubles each time)
+  pack_time:       { value: 0.25, min: 0.02, max: 3, step: 0.01 }, // s per item at the packing table
+  pack_cost:       { value: 1,   min: 0, max: 20, step: 0.5 },    // € box per item
+  ship_time:       { value: 8,   min: 1, max: 60, step: 1 },      // s the van is away; money arrives when it is back
+  auto_ship_price: { value: 1200, min: 0, max: 20000, step: 50 }, // € Auto-Versand (conveyor + auto packing)
+  auto_ship_every: { value: 6,   min: 1, max: 60, step: 1 },      // s between automatic pack-and-ship checks
 };

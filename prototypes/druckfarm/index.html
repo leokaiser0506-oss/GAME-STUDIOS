@@ -18,17 +18,27 @@
 <script src="config.js"></script>
 <script>
 'use strict';
-// Druckfarm: a 3D-printer business tycoon. Buy filament, print, sell, maintain, expand.
+// Druckfarm: a 3D-printer business tycoon. Walk the workshop, keep each printer fed and
+// maintained, pack and ship what it prints, automate printer by printer.
+//
+// Built to map onto Roblox one to one (the port is a translation, not a redesign):
+//   config.js            -> ReplicatedStorage.Config (ModuleScript): every number
+//   ECONOMY / PRINTERS   -> ServerScriptService services: all money, prints and wear run on the
+//                           server; the client only asks ("start", "refill", "pack", "ship")
+//   one printer object   -> one printer Model on the plot, its state in attributes
+//   prompts()            -> ProximityPrompts on each printer and station (E, F, R, Q, T, U)
+//   player.x / player.y  -> the Roblox character; walking is Humanoid movement
+//   panel                -> ScreenGui that opens when a prompt is in range
+//   save()               -> DataStore per player at the end of each day
 
 // ---- Built to be checked ----------------------------------------------------------------
 const params = new URLSearchParams(location.search);
-const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value }); // live: tune.speed is CONFIG.speed.value
-const STEP = 1 / 60;            // simulation step in seconds; motion is per second, never per frame
-const W = 1280, H = 720;        // logical size
-const PIXEL = false;
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value });
+const STEP = 1 / 60;
+const W = 1280, H = 720;
 const FONT = '"Trebuchet MS", "Segoe UI", Verdana, sans-serif';
 const TITLE = 'Druckfarm';
-const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 }; // a check may inject one
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 };
 const CHEAP = params.get('render') === 'cheap';
 let seed;
 function rng() { // mulberry32; every gameplay random call reads this, never Math.random
@@ -37,15 +47,13 @@ function rng() { // mulberry32; every gameplay random call reads this, never Mat
   t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 }
-const events = []; // window.game.events
+const events = [];
 
 // ---- Screen ---------------------------------------------------------------------------
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-let VIEW = { s: 1, left: 0, top: 0 };
 function fit() {
-  const k = Math.min(innerWidth / W, innerHeight / H);
-  const s = k, r = s * (devicePixelRatio || 1);
+  const s = Math.min(innerWidth / W, innerHeight / H), r = s * (devicePixelRatio || 1);
   canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
   canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
   canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
@@ -63,11 +71,10 @@ function rr(x, y, w, h, r) {
   ctx.quadraticCurveTo(x, y + h, x, y + h - r); ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y); ctx.closePath();
 }
 function fillRR(x, y, w, h, r, c) { rr(x, y, w, h, r); ctx.fillStyle = c; ctx.fill(); }
-function poly(pts, c, stroke) {
+function poly(pts, c) {
   ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
   ctx.closePath(); if (c) { ctx.fillStyle = c; ctx.fill(); }
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
 }
 function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
 function ell(x, y, rx, ry, c) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
@@ -87,6 +94,7 @@ function num(f, d = 1) { return f.toFixed(d).replace('.', ','); }
 // ---- Input ------------------------------------------------------------------------------
 const down = new Set(), hit = new Set();
 const pressed = code => hit.has(code);
+const held = code => down.has(code);
 addEventListener('keydown', e => {
   startAudio();
   if (!e.repeat) { down.add(e.code); hit.add(e.code); }
@@ -94,36 +102,18 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => down.delete(e.code));
 addEventListener('blur', () => down.clear());
-const mouse = { x: -1, y: -1, in: false, downAt: null, drag: false };
+const mouse = { x: -1, y: -1, in: false };
 const clicks = [];
 function toLogical(e) {
   const b = canvas.getBoundingClientRect();
   return { x: (e.clientX - b.left) / b.width * W, y: (e.clientY - b.top) / b.height * H };
 }
-canvas.addEventListener('pointerdown', e => {
-  startAudio(); const p = toLogical(e);
-  mouse.downAt = { x: p.x, y: p.y, cx: cam.cx, cy: cam.cy }; mouse.drag = false;
-});
-canvas.addEventListener('pointermove', e => {
-  const p = toLogical(e); mouse.x = p.x; mouse.y = p.y; mouse.in = true;
-  if (mouse.downAt && inFloor(mouse.downAt) && cam.zoom > 1.001) {
-    const dx = p.x - mouse.downAt.x, dy = p.y - mouse.downAt.y;
-    if (Math.hypot(dx, dy) > 6) mouse.drag = true;
-    if (mouse.drag) { cam.cx = mouse.downAt.cx - dx / cam.zoom; cam.cy = mouse.downAt.cy - dy / cam.zoom; clampCam(); }
-  }
-});
-canvas.addEventListener('pointerup', e => {
-  const p = toLogical(e);
-  if (mouse.downAt && !mouse.drag) clicks.push({ x: p.x, y: p.y });
-  mouse.downAt = null; mouse.drag = false;
-});
+canvas.addEventListener('pointerdown', e => { startAudio(); const p = toLogical(e); clicks.push(p); });
+canvas.addEventListener('pointermove', e => { const p = toLogical(e); mouse.x = p.x; mouse.y = p.y; mouse.in = true; });
 canvas.addEventListener('pointerleave', () => { mouse.in = false; });
 canvas.addEventListener('wheel', e => {
   e.preventDefault(); const p = toLogical(e);
-  if (!inFloor(p)) return;
-  const before = toWorld(p.x, p.y);
-  cam.zoom = clamp(cam.zoom * Math.exp(-e.deltaY * 0.0012), 1, 1.9);
-  cam.cx = before.x - (p.x - FCX) / cam.zoom; cam.cy = before.y - (p.y - FCY) / cam.zoom; clampCam();
+  if (inFloor(p)) cam.zoom = clamp(cam.zoom * Math.exp(-e.deltaY * 0.0012), 1, 1.9);
 }, { passive: false });
 
 // ---- Audio --------------------------------------------------------------------------------
@@ -147,6 +137,7 @@ function tone(freq, dur, type = 'square', vol = 0.3, delay = 0) {
 }
 const sfx = {
   coin() { tone(880, 0.08, 'triangle', 0.18); tone(1320, 0.12, 'triangle', 0.15, 0.06); },
+  done() { tone(660, 0.07, 'triangle', 0.12); },
   buy() { tone(330, 0.06, 'square', 0.12); tone(220, 0.1, 'square', 0.12, 0.05); },
   click() { tone(600, 0.04, 'square', 0.08); },
   fail() { tone(200, 0.2, 'sawtooth', 0.12); },
@@ -154,6 +145,7 @@ const sfx = {
   fixed() { tone(520, 0.08, 'triangle', 0.15); tone(780, 0.12, 'triangle', 0.15, 0.08); },
   goal() { [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.18, 'triangle', 0.18, i * 0.09)); },
   bad() { tone(160, 0.3, 'square', 0.12); },
+  van() { tone(140, 0.5, 'sawtooth', 0.08); tone(180, 0.4, 'sawtooth', 0.06, 0.2); },
 };
 
 // ---- Data tables (numbers come from config.js) ------------------------------------------
@@ -184,9 +176,9 @@ function tierDef(t) {
     upgrade: t === 0 ? tune.pr_pro_upgrade : t === 1 ? tune.pr_ind_upgrade : 0 };
 }
 
-// ---- Layout --------------------------------------------------------------------------------
+// ---- Layout (world coordinates) -------------------------------------------------------------
 const FX0 = 0, FY0 = 56, FW = 830, FH = 664, FCX = FX0 + FW / 2, FCY = FY0 + FH / 2;
-const BW = 165, BD = 34, BS = 24; // bench width, depth, skew
+const BW = 128, BD = 28, BS = 18, PS = 0.8; // bench width, depth, skew; printer drawing scale
 const cam = { zoom: 1, cx: FCX, cy: FCY };
 function clampCam() {
   const hw = FW / 2 / cam.zoom, hh = FH / 2 / cam.zoom;
@@ -196,43 +188,57 @@ function inFloor(p) { return p.x >= FX0 && p.x < FX0 + FW && p.y >= FY0 && p.y <
 function toWorld(x, y) { return { x: (x - FCX) / cam.zoom + cam.cx, y: (y - FCY) / cam.zoom + cam.cy }; }
 function slotPos(i) {
   const row = i < 4 ? 0 : 1, col = i % 4;
-  const x0 = (row === 0 ? 62 : 32) + col * 190, ty = row === 0 ? 380 : 600;
-  return { x0, ty, bx: x0 + BW / 2 + BS / 2, by: ty - BD / 2 + 4 };
+  const x0 = 222 + col * 150, ty = row === 0 ? 405 : 625;
+  const bx = x0 + BW / 2 + BS / 2;
+  return { x0, ty, bx, by: ty - BD / 2 + 3, px: x0 + BW / 2, py: ty + 44 };
 }
-function inSlot(i, w) {
-  const s = slotPos(i);
-  return w.x >= s.x0 - 4 && w.x <= s.x0 + BW + BS + 4 && w.y >= s.ty - 200 && w.y <= s.ty + 30;
+// stations: prompt point (px, py) and the footprint the player cannot walk through
+const STATION = {
+  ship: { name: 'Versandtor', px: 105, py: 272, foot: null },
+  pack: { name: 'Packtisch', px: 105, py: 478, foot: [26, 398, 178, 446] },
+  store: { name: 'Lager-Regal', px: 105, py: 590, foot: [26, 612, 178, 656] },
+};
+const BOUNDS = [14, 252, 816, 712];
+function footprints() {
+  const f = [];
+  for (let i = 0; i < 8; i++) { const s = slotPos(i); f.push([s.x0 - 2, s.ty - BD - 6, s.x0 + BW + BS + 2, s.ty + 24]); }
+  for (const k in STATION) if (STATION[k].foot) f.push(STATION[k].foot);
+  return f;
 }
-const SHELF_Y = 198;
+const FOOT = footprints();
 
 // ---- State ---------------------------------------------------------------------------------
-const SAVE_KEY = 'druckfarm-save-v1';
+const SAVE_KEY = 'druckfarm-save-v2';
 let scene, state, anim = 0, ui = [];
 function newPrinter(slot, tier = 0) {
-  return { slot, tier, wear: 0, job: 'key', fil: 'cheap', status: 'idle', prog: 0, timer: 0,
-    auto: false, maintQueued: false, cur: null, why: '' };
+  return { slot, tier, wear: 0, job: 'key', fil: 'cheap', spool: { type: 'cheap', g: 0 }, status: 'idle', prog: 0, timer: 0,
+    auto: false, maintQueued: false, cur: null, why: '', held: null, autoMaint: false, autoFeed: false };
 }
 function freshToday() {
-  return { inc: 0, out: { Filament: 0, Wartung: 0, Reparatur: 0, Drucker: 0, Baupläne: 0, Upgrades: 0 }, prints: 0, fails: 0, clogs: 0 };
+  return { inc: 0, out: { Filament: 0, Wartung: 0, Reparatur: 0, Drucker: 0, Baupläne: 0, Upgrades: 0, Automatik: 0, Kartons: 0, Lager: 0 }, prints: 0, fails: 0, clogs: 0, shipped: 0 };
 }
 function reset() {
   seed = Number(params.get('seed')) || CONFIG.seed;
+  const p0 = newPrinter(0); p0.spool.g = tune.start_filament;
+  const s0 = slotPos(0);
   state = {
     t: 0, score: 0, gained: '',
     money: tune.start_money, day: 1, dayT: 0, warn: false,
-    stock: { cheap: tune.start_filament, plus: 0, petg: 0, resin: 0 },
-    printers: [newPrinter(0)], sel: 0,
+    printers: [p0],
     plans: { key: true, holder: false, dragon: false, gear: false, helmet: false, drone: false },
-    stats: { prints: 0, fails: 0, clogs: 0, maint: 0, repairs: 0, earned: 0, bestDay: 0, bought: 0,
+    stats: { prints: 0, fails: 0, clogs: 0, maint: 0, repairs: 0, earned: 0, bestDay: 0, refills: 0, packed: 0, shipped: 0, autos: 0,
       byFil: { cheap: 0, plus: 0, petg: 0, resin: 0 } },
     today: freshToday(), ledger: [], ms: 0, big: 0, summary: null, stuckT: 0, started: false,
-    fx: [], flying: [], shelf: [], confetti: [], banner: null, overReason: '',
+    store: [], storeLvl: 0, packQ: [], packT: 0, packed: [], truck: { st: 'dock', t: 0, value: 0, n: 0 }, autoShip: false, autoShipT: 0,
+    player: { x: s0.px, y: s0.py + 6, dir: 1, walk: 0, moving: false, to: null },
+    near: null,
+    fx: [], flying: [], confetti: [], banner: null, overReason: '',
   };
   cam.zoom = 1; cam.cx = FCX; cam.cy = FCY;
 }
 function save() {
   try {
-    const s = Object.assign({}, state, { fx: [], flying: [], confetti: [], banner: null, seedNow: seed });
+    const s = Object.assign({}, state, { fx: [], flying: [], confetti: [], banner: null, near: null, seedNow: seed });
     localStorage.setItem(SAVE_KEY, JSON.stringify(s));
   } catch (e) { /* storage blocked: the game plays without saving */ }
 }
@@ -242,14 +248,16 @@ function loadSave() {
 function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* ignore */ } }
 function continueGame(s) {
   reset(); Object.assign(state, s); if (s.seedNow) seed = s.seedNow;
-  state.fx = []; state.flying = []; state.confetti = []; state.banner = null; scene = 'play';
+  state.fx = []; state.flying = []; state.confetti = []; state.banner = null; state.player.to = null; scene = 'play';
 }
 
-// ---- Economy helpers ----------------------------------------------------------------------
+// ---- ECONOMY (server side in Roblox) ---------------------------------------------------------
 const maxTier = () => state.printers.reduce((m, p) => Math.max(m, p.tier), 0);
 const nextPrice = () => Math.round(tune.printer_base_price * Math.pow(tune.printer_price_growth, state.printers.length - 1));
 const rentToday = () => Math.round((tune.rent_base + tune.rent_per_printer * state.printers.length) * Math.pow(tune.rent_growth, state.day - 1));
-const filUnlocked = f => FIL_TIER[f] <= maxTier();
+const storeCap = () => tune.store_cap + tune.store_cap_add * state.storeLvl;
+const storeUpPrice = () => Math.round(tune.store_up_price * Math.pow(2, state.storeLvl));
+const printerAt = slot => state.printers.find(p => p.slot === slot);
 function ledger(textS, amt) {
   state.ledger.unshift({ text: textS, amt, t: state.t });
   if (state.ledger.length > 6) state.ledger.pop();
@@ -262,15 +270,30 @@ function earn(amt, label) {
   state.money += amt; state.today.inc += amt; state.stats.earned += amt; state.score = Math.round(state.stats.earned);
   ledger(label, amt);
 }
-function fx(x, y, s, c) { state.fx.push({ x, y, s, c, t: 0, life: 1.5 }); }
-function headPos(p) { const s = slotPos(p.slot); return { x: s.bx, y: s.by - 110 }; }
+function fx(x, y, s, c) { state.fx.push({ x, y, s, c, t: 0, life: 1.6 }); }
+function fxAt(p, s, c) { const sp = slotPos(p.slot); fx(sp.bx, sp.by - 150, s, c); }
 
-// ---- Actions ---------------------------------------------------------------------------------
+// ---- PRINTERS (server side in Roblox) -----------------------------------------------------------
+function refill(p, auto = false) {
+  if (!p) return false;
+  const f = filDef(p.fil);
+  if (f.tier > p.tier) { sfx.bad(); return false; }
+  const swap = p.spool.type !== p.fil && p.spool.g > 0;
+  if (!swap && p.spool.g + tune.pack_grams > tune.spool_max) { if (!auto) { fxAt(p, 'Spule ist voll', '#f3b25b'); sfx.bad(); } return false; }
+  if (!spend('Filament', f.price, `${auto ? 'Zuführung' : 'Filament'} #${p.slot + 1}: ${f.name} +${tune.pack_grams} g`)) return false;
+  if (swap) { fxAt(p, `Spule gewechselt, ${Math.round(p.spool.g)} g weg`, '#f3b25b'); p.spool.g = 0; }
+  p.spool.type = p.fil; p.spool.g += tune.pack_grams; state.stats.refills++;
+  if (!auto) sfx.buy();
+  if (p.status === 'wait' && p.auto) tryStart(p);
+  return true;
+}
 function tryStart(p) {
-  const o = objDef(p.job), f = filDef(p.fil);
-  if (!state.plans[p.job] || o.tier > p.tier || f.tier > p.tier) { p.status = 'wait'; p.why = 'Auftrag passt nicht'; return false; }
-  if (state.stock[p.fil] < o.g) { p.status = 'wait'; p.why = 'Kein ' + f.name; return false; }
-  state.stock[p.fil] -= o.g; p.status = 'print'; p.prog = 0; p.cur = { job: p.job, fil: p.fil }; p.why = '';
+  const o = objDef(p.job), f = filDef(p.spool.type);
+  if (!state.plans[p.job] || o.tier > p.tier) { p.status = 'wait'; p.why = 'Auftrag passt nicht'; return false; }
+  if (p.spool.g < o.g && p.autoFeed && state.money >= filDef(p.fil).price) refill(p, true);
+  if (p.spool.g < o.g) { p.status = 'wait'; p.why = 'Spule leer'; return false; }
+  if (f.tier > p.tier) { p.status = 'wait'; p.why = 'Filament passt nicht'; return false; }
+  p.spool.g -= o.g; p.status = 'print'; p.prog = 0; p.cur = { job: p.job, fil: p.spool.type }; p.why = '';
   return true;
 }
 function toggleRun(p) {
@@ -280,40 +303,39 @@ function toggleRun(p) {
   p.auto = true; sfx.click();
   if (p.status === 'idle' || p.status === 'wait') tryStart(p);
 }
+function startMaint(p, label) {
+  if (!spend('Wartung', tierDef(p.tier).maint, label || `Wartung #${p.slot + 1}`)) return false;
+  p.status = 'maint'; p.timer = 0; state.stats.maint++; return true;
+}
 function doMaint(p) {
-  if (!p || p.status === 'clog' || p.status === 'maint' || p.status === 'repair') return;
-  const c = tierDef(p.tier).maint;
-  if (p.status === 'print') { if (state.money >= c) { p.maintQueued = !p.maintQueued; sfx.click(); } else sfx.bad(); return; }
-  if (!spend('Wartung', c, `Wartung Drucker #${p.slot + 1}`)) return;
-  p.status = 'maint'; p.timer = 0; state.stats.maint++; sfx.click();
+  if (!p) return;
+  if (p.status === 'clog') { doRepair(p); return; }
+  if (p.status === 'maint' || p.status === 'repair' || p.status === 'held') return;
+  if (p.status === 'print') { if (state.money >= tierDef(p.tier).maint) { p.maintQueued = !p.maintQueued; sfx.click(); } else sfx.bad(); return; }
+  if (startMaint(p)) sfx.click();
 }
 function doRepair(p) {
   if (!p || p.status !== 'clog') return;
-  if (!spend('Reparatur', tierDef(p.tier).repair, `Reparatur Drucker #${p.slot + 1}`)) return;
+  if (!spend('Reparatur', tierDef(p.tier).repair, `Reparatur #${p.slot + 1}`)) return;
   p.status = 'repair'; p.timer = 0; state.stats.repairs++; sfx.click();
 }
 function doUpgrade(p) {
   if (!p || p.tier >= 2 || p.status === 'print' || p.status === 'maint' || p.status === 'repair') return;
-  const t = tierDef(p.tier);
-  if (!spend('Upgrades', t.upgrade, `Upgrade #${p.slot + 1} auf ${TIER_NAME[p.tier + 1]}`)) return;
-  p.tier++; p.wear = 0; p.status = 'idle'; sfx.buy();
-  const s = slotPos(p.slot); fx(s.bx, s.by - 150, TIER_NAME[p.tier] + '!', '#ffd166');
-  if (p.auto) tryStart(p);
+  if (!spend('Upgrades', tierDef(p.tier).upgrade, `Upgrade #${p.slot + 1} auf ${TIER_NAME[p.tier + 1]}`)) return;
+  p.tier++; p.wear = 0; if (p.status !== 'held') p.status = 'idle'; sfx.buy();
+  fxAt(p, TIER_NAME[p.tier] + '!', '#ffd166');
+  if (p.auto && p.status === 'idle') tryStart(p);
+}
+function buyAuto(p, kind) {
+  if (!p) return;
+  if (kind === 'maint' && !p.autoMaint) { if (spend('Automatik', tune.auto_maint_price, `Wartungs-Roboter #${p.slot + 1}`)) { p.autoMaint = true; state.stats.autos++; sfx.buy(); fxAt(p, 'Wartungs-Roboter!', '#ffd166'); } }
+  if (kind === 'feed' && !p.autoFeed) { if (spend('Automatik', tune.auto_feed_price, `Filament-Zuführung #${p.slot + 1}`)) { p.autoFeed = true; state.stats.autos++; sfx.buy(); fxAt(p, 'Filament-Zuführung!', '#ffd166'); if (p.status === 'wait' && p.auto) tryStart(p); } }
 }
 function buyPrinter(slot) {
-  if (state.printers.length >= 8 || state.printers.some(p => p.slot === slot)) return;
-  const price = nextPrice();
-  if (!spend('Drucker', price, `Neuer Drucker #${slot + 1}`)) return;
-  const sel = state.printers[state.sel];
-  const np = newPrinter(slot);
-  if (sel) { np.job = OBJ_TIER[sel.job] === 0 ? sel.job : 'key'; np.fil = FIL_TIER[sel.fil] === 0 ? sel.fil : 'cheap'; }
-  state.printers.push(np); state.sel = state.printers.length - 1; sfx.buy();
-  const s = slotPos(slot); fx(s.bx, s.by - 120, 'Neuer Drucker!', '#7ee08f');
-}
-function buyFil(f) {
-  if (!filUnlocked(f)) return;
-  if (!spend('Filament', filDef(f).price, `${FIL_NAME[f]} +${tune.pack_grams} g`)) return;
-  state.stock[f] += tune.pack_grams; state.stats.bought++; sfx.buy();
+  if (state.printers.length >= 8 || printerAt(slot)) return;
+  if (!spend('Drucker', nextPrice(), `Neuer Drucker #${slot + 1}`)) return;
+  state.printers.push(newPrinter(slot)); sfx.buy();
+  const s = slotPos(slot); fx(s.bx, s.by - 120, 'Neuer Drucker! Spule leer: F', '#7ee08f');
 }
 function buyPlan(o) {
   if (state.plans[o]) return;
@@ -326,23 +348,76 @@ function chooseJob(p, o) {
   p.job = o; sfx.click();
   if (p.status === 'wait' && p.auto) tryStart(p);
 }
-function chooseFil(p, f) {
-  if (FIL_TIER[f] > p.tier) { sfx.bad(); return; }
-  p.fil = f; sfx.click();
+function cycleJob(p) {
+  const ok = OBJ.filter(o => state.plans[o] && OBJ_TIER[o] <= p.tier);
+  p.job = ok[(ok.indexOf(p.job) + 1) % ok.length]; sfx.click();
   if (p.status === 'wait' && p.auto) tryStart(p);
+}
+function chooseFil(p, f) { if (FIL_TIER[f] > p.tier) { sfx.bad(); return; } p.fil = f; sfx.click(); }
+function cycleFil(p) { const ok = FIL.filter(f => FIL_TIER[f] <= p.tier); p.fil = ok[(ok.indexOf(p.fil) + 1) % ok.length]; sfx.click(); }
+
+// ---- STORAGE AND SHIPPING (server side in Roblox) -------------------------------------------------
+function packAll() {
+  const n = state.store.length;
+  if (!n) { sfx.bad(); return; }
+  const k = tune.pack_cost > 0 ? Math.min(n, Math.floor(state.money / tune.pack_cost)) : n;
+  if (k <= 0) { sfx.bad(); return; }
+  if (tune.pack_cost > 0 && !spend('Kartons', tune.pack_cost * k, `Kartons: ${k} Stück`)) return;
+  state.packQ.push(...state.store.splice(0, k)); sfx.click();
+}
+function shipAll() {
+  if (state.truck.st !== 'dock' || !state.packed.length) { sfx.bad(); return; }
+  const v = state.packed.reduce((a, b) => a + b, 0);
+  state.truck = { st: 'away', t: 0, value: v, n: state.packed.length };
+  state.packed = []; state.stats.shipped++; sfx.van();
+  fx(105, 180, `Lieferwagen fährt: ${state.truck.n} Pakete`, '#ffd98a');
+}
+function upgradeStore() {
+  if (spend('Lager', storeUpPrice(), `Lager-Regal +${tune.store_cap_add} Plätze`)) { state.storeLvl++; sfx.buy(); fx(105, 520, `Lager: ${storeCap()} Plätze`, '#7ee08f'); }
+}
+function buyAutoShip() {
+  if (state.autoShip) return;
+  if (spend('Automatik', tune.auto_ship_price, 'Auto-Versand (Förderband)')) { state.autoShip = true; state.stats.autos++; sfx.buy(); fx(105, 200, 'Auto-Versand!', '#ffd166'); }
+}
+function updateLogistics(dt) {
+  if (state.packQ.length) {
+    state.packT += dt;
+    while (state.packQ.length && state.packT >= tune.pack_time) { state.packT -= tune.pack_time; state.packed.push(state.packQ.shift().v); state.stats.packed++; }
+    if (!state.packQ.length) { state.packT = 0; sfx.done(); }
+  }
+  const tr = state.truck;
+  if (tr.st === 'away') {
+    tr.t += dt;
+    if (tr.t >= tune.ship_time) {
+      earn(tr.value, `Lieferung: ${tr.n} Pakete`); state.today.shipped += tr.n;
+      fx(105, 180, '+' + eur(tr.value), '#7ee08f'); sfx.coin();
+      state.truck = { st: 'dock', t: 0, value: 0, n: 0 };
+    }
+  }
+  if (state.autoShip) {
+    state.autoShipT += dt;
+    if (state.autoShipT >= tune.auto_ship_every) {
+      state.autoShipT = 0;
+      if (state.store.length) packAll();
+      if (state.packed.length && state.truck.st === 'dock' && !state.packQ.length) shipAll();
+    }
+  }
 }
 
 // ---- Goals -------------------------------------------------------------------------------------
 const cnt = n => Math.min(1, state.printers.length / n);
 const afford = c => Math.min(0.99, Math.max(0, state.money) / c);
 const MS = [
+  { t: () => 'Verschick deine erste Lieferung', p: () => state.stats.shipped >= 1 ? 1 : state.packed.length ? 0.66 : state.stats.packed ? 0.5 : state.store.length ? 0.33 : 0, r: 10 },
   { t: () => 'Kauf deinen zweiten Drucker', p: () => state.printers.length >= 2 ? 1 : afford(nextPrice()), r: 25 },
   { t: () => 'Mach eine Wartung', p: () => state.stats.maint >= 1 ? 1 : 0, r: 15 },
   { t: () => 'Kauf den Bauplan „Handyhalter“', p: () => state.plans.holder ? 1 : afford(tune.obj_holder_plan), r: 30 },
   { t: () => 'Besitze 3 Drucker', p: () => cnt(3), r: 50 },
+  { t: () => 'Automatisiere einen Drucker', p: () => state.stats.autos >= 1 ? 1 : afford(tune.auto_maint_price), r: 60 },
   { t: () => 'Rüste einen Drucker auf Pro auf', p: () => maxTier() >= 1 ? 1 : afford(tune.pr_pro_upgrade), r: 80 },
   { t: () => 'Drucke 10 Teile aus PETG', p: () => Math.min(1, state.stats.byFil.petg / 10), r: 100 },
   { t: () => 'Besitze 5 Drucker', p: () => cnt(5), r: 150 },
+  { t: () => 'Bau den Auto-Versand', p: () => state.autoShip ? 1 : afford(tune.auto_ship_price), r: 200 },
   { t: () => 'Kauf den Bauplan „Cosplay-Helm“', p: () => state.plans.helmet ? 1 : afford(tune.obj_helmet_plan), r: 200 },
   { t: () => 'Stell einen Industrie-Drucker auf', p: () => maxTier() >= 2 ? 1 : afford(tune.pr_ind_upgrade), r: 400 },
   { t: () => 'Besitze 8 Drucker: volle Druckfarm', p: () => cnt(8), r: 600 },
@@ -366,41 +441,47 @@ function checkGoals() {
 function celebrate(label, reward) {
   state.money += reward; state.today.inc += reward; ledger('Ziel: ' + label, reward);
   state.banner = { s: `Ziel geschafft: ${label}  +${eur(reward)}`, t: 0, c: '#2f9e55' };
-  for (let i = 0; i < 50; i++) state.confetti.push({ x: 1050 + (rng() - 0.5) * 380, y: 570, vx: (rng() - 0.5) * 260, vy: -120 - rng() * 260, c: ['#ffd166', '#7ee08f', '#5ab0ff', '#ff7b9c'][i % 4], t: 0, r: rng() * 6 });
+  for (let i = 0; i < 50; i++) state.confetti.push({ x: 1050 + (rng() - 0.5) * 380, y: 600, vx: (rng() - 0.5) * 260, vy: -120 - rng() * 260, c: ['#ffd166', '#7ee08f', '#5ab0ff', '#ff7b9c'][i % 4], t: 0, r: rng() * 6 });
   sfx.goal();
 }
 
 // ---- Simulation -------------------------------------------------------------------------------
+function afterPrint(p) {
+  if (p.maintQueued || (p.autoMaint && p.wear >= tune.auto_maint_at)) {
+    const robot = !p.maintQueued; p.maintQueued = false;
+    if (startMaint(p, robot ? `Roboter-Wartung #${p.slot + 1}` : undefined)) return;
+  }
+  p.status = 'idle';
+  if (p.auto) tryStart(p);
+}
+function deposit(p, item) {
+  if (state.store.length >= storeCap()) return false;
+  state.store.push(item);
+  const sp = slotPos(p.slot), n = state.store.length - 1;
+  state.flying.push({ id: item.id, c: item.c, x0: sp.bx, y0: sp.by - 40, x1: rackSlot(n).x, y1: rackSlot(n).y, t: 0 });
+  return true;
+}
 function finishPrint(p) {
   const o = objDef(p.cur.job), f = filDef(p.cur.fil);
   const wearFail = p.wear > tune.wear_fail_start ? (p.wear - tune.wear_fail_start) / (100 - tune.wear_fail_start) * tune.wear_fail_add : 0;
-  const s = slotPos(p.slot);
   state.today.prints++;
+  const item = { id: o.id, c: f.color, v: o.price * f.value };
+  p.prog = 0; p.cur = null;
   if (rng() < f.fail + wearFail) {
     state.stats.fails++; state.today.fails++;
-    fx(s.bx, s.by - 130, 'Fehldruck! −' + o.g + ' g', '#ff6b6b'); ledger(`Fehldruck #${p.slot + 1}: ${o.name}`, 0); sfx.fail();
+    fxAt(p, 'Fehldruck! −' + o.g + ' g', '#ff6b6b'); ledger(`Fehldruck #${p.slot + 1}: ${o.name}`, 0); sfx.fail();
     events.push({ type: 'misprint', slot: p.slot });
-  } else {
-    const value = o.price * f.value;
-    earn(value, `${o.name} (${FIL_SHORT[f.id]}) #${p.slot + 1}`);
-    state.stats.prints++; state.stats.byFil[f.id]++;
-    fx(s.bx, s.by - 130, '+' + eur(value), '#7ee08f'); sfx.coin();
-    const slotN = state.shelf.length % 8;
-    state.flying.push({ id: o.id, c: f.color, x0: s.bx, y0: s.by - 40, x1: 505 + slotN * 39, y1: SHELF_Y, t: 0 });
-    events.push({ type: 'sold', slot: p.slot, value });
+    afterPrint(p); return;
   }
-  p.status = 'idle'; p.prog = 0; p.cur = null;
-  if (p.maintQueued) {
-    p.maintQueued = false;
-    if (spend('Wartung', tierDef(p.tier).maint, `Wartung Drucker #${p.slot + 1}`)) { p.status = 'maint'; p.timer = 0; state.stats.maint++; return; }
-  }
-  if (p.auto) tryStart(p);
+  state.stats.prints++; state.stats.byFil[f.id]++;
+  events.push({ type: 'printed', slot: p.slot, value: item.v });
+  if (deposit(p, item)) { fxAt(p, `${OBJ_SHORT[o.id]} ins Lager (${eur(item.v)})`, '#cfe9d4'); sfx.done(); afterPrint(p); }
+  else { p.held = item; p.status = 'held'; p.why = 'Lager voll'; fxAt(p, 'Lager voll!', '#ff9b5b'); sfx.bad(); }
 }
 function clog(p) {
-  const s = slotPos(p.slot);
   p.status = 'clog'; p.prog = 0; p.cur = null; p.maintQueued = false;
   state.stats.clogs++; state.today.clogs++;
-  fx(s.bx, s.by - 140, 'Verstopft!', '#ff6b6b'); ledger(`Drucker #${p.slot + 1} verstopft`, 0); sfx.clog();
+  fxAt(p, 'Verstopft!', '#ff6b6b'); ledger(`Drucker #${p.slot + 1} verstopft`, 0); sfx.clog();
   events.push({ type: 'clog', slot: p.slot });
 }
 function updatePrinter(p, dt) {
@@ -409,6 +490,7 @@ function updatePrinter(p, dt) {
     const o = objDef(p.cur.job);
     p.prog += dt * td.speed / o.time;
     p.wear = Math.min(100, p.wear + td.wear * dt);
+    if (p.autoMaint && p.wear >= tune.auto_maint_at && state.money >= td.maint) p.maintQueued = true;
     if (p.wear >= 100) { clog(p); return; }
     if (p.wear > tune.wear_clog_start) {
       const h = tune.clog_rate * (p.wear - tune.wear_clog_start) / (100 - tune.wear_clog_start);
@@ -421,20 +503,22 @@ function updatePrinter(p, dt) {
   } else if (p.status === 'repair') {
     p.timer += dt;
     if (p.timer >= tune.repair_time) { p.wear = tune.repair_wear; p.status = 'idle'; sfx.fixed(); if (p.auto) tryStart(p); }
+  } else if (p.status === 'held') {
+    if (deposit(p, p.held)) { p.held = null; p.why = ''; afterPrint(p); }
   } else if (p.status === 'wait' && p.auto) {
     tryStart(p);
+  } else if (p.status === 'idle' && p.autoMaint && p.wear >= tune.auto_maint_at) {
+    startMaint(p, `Roboter-Wartung #${p.slot + 1}`);
   }
 }
 const busy = p => p.status === 'print' || p.status === 'maint' || p.status === 'repair';
 function canAct() {
-  const unlocked = FIL.filter(filUnlocked);
-  const cheapest = Math.min(...unlocked.map(f => filDef(f).price));
+  if (state.store.length || state.packQ.length || state.packed.length || state.truck.st === 'away') return true;
+  const cheapest = Math.min(...FIL.filter(f => FIL_TIER[f] <= maxTier()).map(f => filDef(f).price));
   for (const p of state.printers) {
+    if (p.status === 'held') return true;
     if (p.status === 'clog') { if (state.money >= tierDef(p.tier).repair) return true; continue; }
-    for (const o of OBJ) {
-      if (!state.plans[o] || OBJ_TIER[o] > p.tier) continue;
-      for (const f of FIL) if (FIL_TIER[f] <= p.tier && state.stock[f] >= objDef(o).g) return true;
-    }
+    for (const o of OBJ) if (state.plans[o] && OBJ_TIER[o] <= p.tier && p.spool.g >= objDef(o).g) return true;
     if (state.money >= cheapest) return true;
   }
   return false;
@@ -444,7 +528,7 @@ function endDay() {
   state.money -= rent; ledger(`Miete + Strom Tag ${state.day}`, -rent);
   const out = Object.values(state.today.out).reduce((a, b) => a + b, 0) + rent;
   state.summary = { day: state.day, inc: state.today.inc, out: Object.assign({}, state.today.out), rent, total: out,
-    profit: state.today.inc - out, prints: state.today.prints, fails: state.today.fails, clogs: state.today.clogs, warn: false };
+    profit: state.today.inc - out, prints: state.today.prints, fails: state.today.fails, clogs: state.today.clogs, shipped: state.today.shipped, warn: false };
   state.stats.bestDay = Math.max(state.stats.bestDay, state.today.inc);
   if (state.money < 0) {
     if (state.warn) { gameOver('Zwei Tage hintereinander im Minus: die Bank macht die Werkstatt zu.'); return; }
@@ -458,59 +542,135 @@ function gameOver(reason) {
   state.gained = `Tag ${state.day} erreicht · ${eur(state.stats.earned)} verdient · ${state.printers.length} Drucker`;
   clearSave(); sfx.clog(); scene = 'over';
 }
-function hintNow() {
-  if (!state.started) return { s: 'Klick auf „Start“: Drucker #1 druckt Schlüsselanhänger', id: 'start' };
-  const lowFil = state.printers.some(p => p.status === 'wait' && p.why.startsWith('Kein'));
-  if (state.stats.bought === 0 && (state.stock.cheap < 60 || lowFil)) return { s: 'Filament wird knapp: kauf im Lager nach. Billig oder besser?', id: 'buyfil' };
-  const clogged = state.printers.find(p => p.status === 'clog');
-  if (clogged && state.stats.repairs === 0) return { s: `Drucker #${clogged.slot + 1} ist verstopft! Reparieren ist teurer als Wartung.`, id: 'repair' };
-  const worn = state.printers.find(p => p.wear >= tune.wear_warn - 5 && p.status !== 'clog');
-  if (worn && state.stats.maint === 0) return { s: `Drucker #${worn.slot + 1} verschleißt: mach eine Wartung, bevor er verstopft`, id: 'maint' };
-  if (state.printers.length === 1 && state.money >= nextPrice()) return { s: 'Genug Geld: klick einen freien Platz und kauf Drucker #2', id: 'slot' };
-  if (state.printers.some(p => !p.auto && p.status === 'idle') && state.printers.length > 1 && state.printers.length <= 3) {
-    const p = state.printers.find(q => !q.auto && q.status === 'idle');
-    return { s: `Drucker #${p.slot + 1} steht still: wähl ihn aus und klick „Start“`, id: 'start' };
+
+// ---- PLAYER (client side in Roblox: the character and its prompts) --------------------------------
+function blocked(x, y) {
+  const r = 9;
+  if (x < BOUNDS[0] || x > BOUNDS[2] || y < BOUNDS[1] || y > BOUNDS[3]) return true;
+  for (const f of FOOT) if (x > f[0] - r && x < f[2] + r && y > f[1] - r / 2 && y < f[3] + r / 2) return true;
+  return false;
+}
+function movePlayer(dt) {
+  const pl = state.player;
+  let dx = 0, dy = 0;
+  if (held('KeyA') || held('ArrowLeft')) dx--;
+  if (held('KeyD') || held('ArrowRight')) dx++;
+  if (held('KeyW') || held('ArrowUp')) dy--;
+  if (held('KeyS') || held('ArrowDown')) dy++;
+  if (dx || dy) pl.to = null;
+  else if (pl.to) {
+    const vx = pl.to.x - pl.x, vy = pl.to.y - pl.y, d = Math.hypot(vx, vy);
+    if (d < 4) pl.to = null; else { dx = vx / d; dy = vy / d; }
   }
-  if (state.warn) return { s: 'Mahnung von der Bank: beende diesen Tag im Plus, sonst ist Schluss!', id: 'warn' };
+  const len = Math.hypot(dx, dy);
+  pl.moving = len > 0;
+  if (!len) return;
+  const sp = tune.walk_speed * dt / len;
+  const nx = pl.x + dx * sp, ny = pl.y + dy * sp;
+  let movedAny = false;
+  if (!blocked(nx, pl.y)) { pl.x = nx; movedAny = true; }
+  if (!blocked(pl.x, ny)) { pl.y = ny; movedAny = true; }
+  if (!movedAny && pl.to) pl.to = null;
+  if (dx) pl.dir = dx > 0 ? 1 : -1;
+  pl.walk += dt * 10;
+}
+function findNear() {
+  const pl = state.player; let best = null, bd = tune.interact_range;
+  for (let i = 0; i < 8; i++) {
+    const s = slotPos(i), d = Math.hypot(pl.x - s.px, pl.y - s.py);
+    if (d < bd) { bd = d; best = printerAt(i) ? { kind: 'printer', slot: i } : { kind: 'slot', slot: i }; }
+  }
+  for (const k in STATION) {
+    const s = STATION[k], d = Math.hypot(pl.x - s.px, pl.y - s.py);
+    if (d < bd) { bd = d; best = { kind: k }; }
+  }
+  return best;
+}
+// the prompts on the thing the player stands at: [key, label, action, enabled]
+function prompts() {
+  const n = state.near; if (!n) return [];
+  if (n.kind === 'printer') {
+    const p = printerAt(n.slot), td = tierDef(p.tier), f = filDef(p.fil);
+    const out = [['E', p.auto ? 'Stopp' : 'Start', () => toggleRun(p), true],
+      ['F', `${f.name} +${tune.pack_grams} g (${eur(f.price)})`, () => refill(p), state.money >= f.price]];
+    if (p.status === 'clog') out.push(['R', `Reparieren (${eur(td.repair)})`, () => doRepair(p), state.money >= td.repair]);
+    else out.push(['R', p.maintQueued ? 'Wartung geplant' : `Wartung (${eur(td.maint)})`, () => doMaint(p), state.money >= td.maint && p.status !== 'maint' && p.status !== 'repair']);
+    return out;
+  }
+  if (n.kind === 'slot') return state.printers.length < 8 ? [['E', `Drucker kaufen (${eur(nextPrice())})`, () => buyPrinter(n.slot), state.money >= nextPrice()]] : [];
+  if (n.kind === 'pack') return [['E', `Alles verpacken (${state.store.length} Teile)`, packAll, state.store.length > 0]];
+  if (n.kind === 'ship') {
+    const o = [['E', state.truck.st === 'dock' ? `Alles verschicken (${state.packed.length} Pakete)` : 'Lieferwagen unterwegs', shipAll, state.truck.st === 'dock' && state.packed.length > 0]];
+    if (!state.autoShip) o.push(['F', `Auto-Versand (${eur(tune.auto_ship_price)})`, buyAutoShip, state.money >= tune.auto_ship_price]);
+    return o;
+  }
+  if (n.kind === 'store') return [['E', `Regal erweitern (${eur(storeUpPrice())})`, upgradeStore, state.money >= storeUpPrice()]];
+  return [];
+}
+function pressPrompt(key) {
+  const pr = prompts().find(q => q[0] === key);
+  if (pr) { if (pr[3]) pr[2](); else sfx.bad(); }
+}
+function hintNow() {
+  const P = state.printers, near = state.near;
+  if (!state.started) return near && near.kind === 'printer' ? { s: 'Drück E: Drucker #1 startet', id: 'start', at: 'p0' } : { s: 'Lauf mit WASD oder Pfeiltasten zu Drucker #1 und drück E', id: 'start', at: 'p0' };
+  if (state.storeFullT > 1) return { s: 'Lager voll! Drucker stehen. Verpacken + verschicken oder Regal erweitern', id: 'pack', at: 'pack', warn: true };
+  if (state.stats.packed === 0 && state.store.length > 0) return { s: 'Teile liegen im Lager. Lauf zum Packtisch (links) und drück E: alles verpacken', id: 'pack', at: 'pack' };
+  if (state.stats.shipped === 0 && state.packed.length > 0) return { s: 'Pakete fertig. Lauf zum Versandtor (oben links) und drück E: alles verschicken', id: 'ship', at: 'ship' };
+  const empty = P.find(p => p.status === 'wait' && p.why === 'Spule leer');
+  if (empty && state.stats.refills < 2) return { s: `Spule von Drucker #${empty.slot + 1} ist leer: hinlaufen, F = Filament nachfüllen`, id: 'refill', at: 'p' + empty.slot };
+  const clogged = P.find(p => p.status === 'clog');
+  if (clogged && state.stats.repairs === 0) return { s: `Drucker #${clogged.slot + 1} ist verstopft! R = Reparieren (teurer als Wartung)`, id: 'repair', at: 'p' + clogged.slot };
+  const worn = P.find(p => p.wear >= tune.wear_warn - 5 && p.status !== 'clog' && !p.autoMaint);
+  if (worn && state.stats.maint === 0) return { s: `Drucker #${worn.slot + 1} verschleißt: hinlaufen, R = Wartung, bevor er verstopft`, id: 'maint', at: 'p' + worn.slot };
+  if (P.length === 1 && state.money >= nextPrice()) return { s: 'Genug Geld: lauf zu einem freien Platz und drück E für Drucker #2', id: 'slot', at: 'slot' };
+  if (state.warn) return { s: 'Mahnung von der Bank: beende diesen Tag im Plus, sonst ist Schluss!', id: 'warn', warn: true };
+  if (P.length >= 3 && state.stats.autos === 0 && state.money >= tune.auto_maint_price) return { s: 'Zu viel Rennerei? Am Drucker gibt es Wartungs-Roboter und Filament-Zuführung', id: 'auto' };
   return null;
 }
 function updatePlay(dt) {
   state.t += dt; state.dayT += dt;
+  movePlayer(dt);
+  state.near = findNear();
   for (const p of state.printers) updatePrinter(p, dt);
+  updateLogistics(dt);
+  state.storeFullT = state.store.length >= storeCap() && state.printers.some(p => p.status === 'held') ? (state.storeFullT || 0) + dt : 0;
   checkGoals();
-  // bankruptcy when nothing can happen any more
   if (!state.printers.some(busy) && !canAct()) {
     state.stuckT += dt;
     if (state.stuckT > tune.stuck_grace) { gameOver('Kein Filament, kein Geld für Nachschub oder Reparatur: Pleite.'); return; }
   } else state.stuckT = 0;
-  // effects
-  for (const f of state.fx) { f.t += dt; f.y -= 34 * dt; }
+  for (const f of state.fx) { f.t += dt; f.y -= 30 * dt; }
   state.fx = state.fx.filter(f => f.t < f.life);
-  for (const f of state.flying) f.t += dt / 0.7;
-  for (const f of state.flying.filter(q => q.t >= 1)) { state.shelf.push({ id: f.id, c: f.c, t: 0 }); if (state.shelf.length > 8) state.shelf.shift(); }
+  for (const f of state.flying) f.t += dt / 0.8;
   state.flying = state.flying.filter(f => f.t < 1);
-  for (const s of state.shelf) s.t += dt;
   for (const c of state.confetti) { c.t += dt; c.vy += 420 * dt; c.x += c.vx * dt; c.y += c.vy * dt; c.r += dt * 8; }
   state.confetti = state.confetti.filter(c => c.t < 1.8);
   if (state.banner) { state.banner.t += dt; if (state.banner.t > 3) state.banner = null; }
+  if (cam.zoom > 1.001) { cam.cx += (state.player.x - cam.cx) * Math.min(1, dt * 6); cam.cy += (state.player.y - 60 - cam.cy) * Math.min(1, dt * 6); }
+  clampCam();
   if (state.dayT >= tune.day_length) endDay();
 }
 
 // ---- UI widgets --------------------------------------------------------------------------------
+function keyChip(x, y, k, dim) {
+  fillRR(x, y - 9, 18, 18, 4, dim ? '#3a4049' : '#f1f4f7');
+  text(k, x + 9, y, 12, dim ? '#a3acb6' : '#15181c', 'center', 'bold');
+}
 function button(x, y, w, h, label, act, o = {}) {
   const en = o.enabled !== false;
   const hov = en && mouse.in && mouse.x >= x && mouse.x <= x + w && mouse.y >= y && mouse.y <= y + h;
   let bg = o.bg || '#414a57';
   if (o.active) bg = o.activeBg || '#2d6cad';
   if (!en) bg = '#2a2f37';
-  rr(x, y, w, h, 6); ctx.fillStyle = hov ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0)';
   fillRR(x, y, w, h, 6, bg);
   if (hov) fillRR(x, y, w, h, 6, 'rgba(255,255,255,0.12)');
   if (o.active) { rr(x + 1, y + 1, w - 2, h - 2, 6); ctx.strokeStyle = '#8cc8ff'; ctx.lineWidth = 2; ctx.stroke(); }
   if (o.pulse) { const k = 0.5 + 0.5 * Math.sin(anim * 7); rr(x - 2, y - 2, w + 4, h + 4, 8); ctx.strokeStyle = `rgba(255,209,102,${0.45 + 0.55 * k})`; ctx.lineWidth = 3; ctx.stroke(); }
   const tc = en ? '#f1f4f7' : '#a3acb6';
-  const lx = o.icon ? x + 30 : x + w / 2, al = o.icon ? 'left' : 'center';
-  if (o.icon) o.icon(x + 15, y + h / 2);
+  let lx = x + w / 2, al = 'center';
+  if (o.key) { keyChip(x + 7, y + h / 2, o.key, !en); lx = x + 32; al = 'left'; }
+  else if (o.icon) { o.icon(x + 15, y + h / 2); lx = x + 30; al = 'left'; }
   if (o.sub) {
     text(label, lx, y + h / 2 - 8, o.size || 13, tc, al, 'bold');
     text(o.sub, lx, y + h / 2 + 9, 12, en ? (o.active ? '#e8eef5' : (o.subC || '#c9d1da')) : '#959fab', al);
@@ -533,13 +693,14 @@ function handleClicks() {
     if (!used && scenes[scene].anyClick) scenes[scene].anyClick();
   }
 }
-function floorClick(w) {
-  for (const i of [4, 5, 6, 7, 0, 1, 2, 3]) {
-    if (!inSlot(i, w)) continue;
-    const idx = state.printers.findIndex(p => p.slot === i);
-    if (idx >= 0) { state.sel = idx; sfx.click(); } else buyPrinter(i);
-    return;
+function floorClick(w) { // tap to walk, like Roblox click-to-move; a click on a station walks to its prompt
+  for (let i = 0; i < 8; i++) {
+    const s = slotPos(i);
+    if (w.x >= s.x0 - 4 && w.x <= s.x0 + BW + BS + 4 && w.y >= s.ty - 170 && w.y <= s.ty + 30) { state.player.to = { x: s.px, y: s.py + 4 }; return; }
   }
+  if (w.x < 200 && w.y < 250) { state.player.to = { x: STATION.ship.px, y: STATION.ship.py + 6 }; return; }
+  for (const k of ['pack', 'store']) { const f = STATION[k].foot; if (w.x >= f[0] && w.x <= f[2] && w.y >= f[1] - 120 && w.y <= f[3]) { state.player.to = { x: STATION[k].px, y: STATION[k].py }; return; } }
+  state.player.to = { x: clamp(w.x, BOUNDS[0], BOUNDS[2]), y: clamp(w.y, BOUNDS[1], BOUNDS[3]) };
 }
 
 // ---- Drawing: figures -------------------------------------------------------------------------
@@ -549,8 +710,8 @@ function drawSpool(x, y, r, color, frac) {
   const outer = r * (0.42 + 0.5 * clamp(frac, 0, 1));
   if (frac > 0.01) {
     ell(x, y, outer, outer, color);
-    ctx.strokeStyle = shade(color.length === 7 ? color : '#888888', 0.8); ctx.lineWidth = 1;
-    for (let k = 0.5; k < outer; k += 3) { ctx.beginPath(); ctx.arc(x, y, k + r * 0.3, 0.2, 2.6); ctx.stroke(); }
+    ctx.strokeStyle = shade(color, 0.8); ctx.lineWidth = 1;
+    for (let k = 0.5; k < outer - r * 0.3; k += 3) { ctx.beginPath(); ctx.arc(x, y, k + r * 0.3, 0.2, 2.6); ctx.stroke(); }
   }
   ell(x, y, r * 0.36, r * 0.36, '#6a717a'); ell(x, y, r * 0.14, r * 0.14, '#16191c');
   ctx.strokeStyle = '#43494f'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r - 1, 0, Math.PI * 2); ctx.stroke();
@@ -614,11 +775,16 @@ function drawObj(id, x, y, s, prog, color) {
       break;
   }
   if (prog < 1 && prog > 0) {
-    // layer lines and the hot top edge
     ctx.fillStyle = 'rgba(0,0,0,0.12)';
     for (let yy = 0; yy > -h * prog; yy -= 2.5) ctx.fillRect(-30, yy, 60, 0.6);
     rect(-30, -h * prog - 0.5, 60, 1.2, 'rgba(255,240,180,0.7)');
   }
+  ctx.restore();
+}
+function drawBox(x, y, s) { // a shipping carton
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  poly([[-9, -12], [7, -12], [11, -16], [-5, -16]], '#e2bf86'); rect(-9, -12, 16, 12, '#c79a5f');
+  poly([[7, -12], [11, -16], [11, -4], [7, 0]], '#a87c45'); rect(-3, -12, 4, 12, '#e8d3a8'); poly([[-3, -12], [1, -12], [5, -16], [1, -16]], '#efe0bd');
   ctx.restore();
 }
 function spaghetti(cx, cy, color, sd) {
@@ -640,11 +806,14 @@ function headFan(x, y, r) {
 function filamentLine(x0, y0, x1, y1, cx, cy, color) {
   ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.quadraticCurveTo(cx, cy, x1, y1); ctx.stroke();
 }
-// p: { tier, status, prog, wear, cur, job, fil, slot }
-function drawPrinter(p, x, y, stockFrac) {
-  const pr = p.status === 'print', job = (p.cur || p).job, fil = (p.cur || p).fil, color = FIL_COLOR[fil];
-  const oh = OBJ_H[job], prog = pr ? p.prog : 0, a = anim + p.slot * 1.3;
-  ctx.save(); ctx.translate(x, y);
+// p: { tier, status, prog, wear, cur, job, spool, slot }; drawn at (x, y), scaled by s
+function drawPrinter(p, x, y, s = 1) {
+  const pr = p.status === 'print', job = (p.cur || p).job, fil = p.cur ? p.cur.fil : p.spool.type, color = FIL_COLOR[fil];
+  const sf = clamp(p.spool.g / tune.pack_grams, 0, 1);
+  const oh = OBJ_H[job], prog = pr ? p.prog : 0, a = anim + p.slot * 1.3, showObj = pr || p.status === 'clog' || p.status === 'held';
+  const objProg = p.status === 'clog' ? 0.35 : p.status === 'held' ? 1 : prog;
+  const objId = p.status === 'held' && p.held ? p.held.id : job, objC = p.status === 'held' && p.held ? p.held.c : color;
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
   ell(4, -2, 70, 9, 'rgba(0,0,0,0.25)');
   if (p.tier === 0) {
     poly([[-56, -14], [56, -14], [66, -22], [-46, -22]], '#454b52'); rect(-56, -14, 112, 14, '#30353a');
@@ -654,13 +823,13 @@ function drawPrinter(p, x, y, stockFrac) {
     rect(-55, -170, 110, 8, '#8d969e');
     const off = pr ? Math.sin(a * 3.1) * 6 : 0;
     poly([[-42 + off, -24], [42 + off, -24], [50 + off, -32], [-34 + off, -32]], '#d6dbe0'); rect(-42 + off, -24, 84, 3, '#1f2226');
-    if (pr || p.status === 'clog') drawObj(job, 4 + off, -27, 1, p.status === 'clog' ? 0.35 : prog, color);
-    const tip = -28 - oh * prog - 1, hx = pr ? Math.sin(a * 6.3) * 22 + 4 + off : 0;
+    if (showObj) drawObj(objId, 4 + off, -27, 1, objProg, objC);
+    const tip = -28 - (p.status === 'held' ? oh : oh * prog) - 1, hx = pr ? Math.sin(a * 6.3) * 22 + 4 + off : 0;
     rect(-50, tip - 17, 100, 6, '#59616a');
     fillRR(hx - 10, tip - 24, 20, 19, 3, '#2a2e33'); headFan(hx, tip - 15, 6);
     poly([[hx - 4, tip - 5], [hx + 4, tip - 5], [hx, tip]], '#d4a017');
-    rect(36, -192, 4, 24, '#8d969e'); drawSpool(38, -198, 15, color, stockFrac);
-    filamentLine(38, -186, hx, tip - 24, 70, -150, color);
+    rect(36, -192, 4, 24, '#8d969e'); drawSpool(38, -198, 15, FIL_COLOR[p.spool.type], sf);
+    if (p.spool.g > 0) filamentLine(38, -186, hx, tip - 24, 70, -150, FIL_COLOR[p.spool.type]);
     if (p.status === 'clog') spaghetti(hx, tip - 2, color, p.slot + 1);
   } else if (p.tier === 1) {
     poly([[-62, -12], [62, -12], [74, -22], [-50, -22]], '#34383d'); rect(-62, -12, 124, 12, '#24272b');
@@ -669,17 +838,17 @@ function drawPrinter(p, x, y, stockFrac) {
     ctx.strokeStyle = '#4a5057'; ctx.lineWidth = 3; ctx.strokeRect(-48, -180, 120, 158);
     ctx.beginPath(); ctx.moveTo(-60, -170); ctx.lineTo(-48, -180); ctx.moveTo(60, -170); ctx.lineTo(72, -180); ctx.moveTo(60, -22); ctx.lineTo(72, -22); ctx.stroke();
     rect(-40, -164, 3, 142, '#8d969e'); rect(37, -164, 3, 142, '#8d969e');
-    const bedY = pr ? -132 + oh * prog : p.status === 'clog' ? -110 : -70;
+    const bedY = pr ? -132 + oh * prog : showObj ? -110 : -70;
     poly([[-46, bedY], [46, bedY], [56, bedY - 10], [-36, bedY - 10]], '#cfd4da'); rect(-46, bedY, 92, 3, '#2a2d31');
-    if (pr || p.status === 'clog') drawObj(job, 4, bedY - 3, 1, p.status === 'clog' ? 0.4 : prog, color);
+    if (showObj) drawObj(objId, 4, bedY - 3, 1, objProg, objC);
     rect(-58, -158, 116, 5, '#6b737c');
     const hx = pr ? Math.sin(a * 5) * 30 + 4 : 0;
     fillRR(hx - 12, -156, 24, 20, 3, '#e6e9ec'); headFan(hx, -146, 6); rect(hx - 12, -156, 24, 3, '#f08a2c');
     poly([[hx - 4, -136], [hx + 4, -136], [hx, -131]], '#d4a017');
     ctx.strokeStyle = '#1d2024'; ctx.lineWidth = 6; ctx.strokeRect(-60, -170, 120, 152);
-    rect(-74, -124, 14, 4, '#6b737c'); drawSpool(-84, -122, 15, color, stockFrac);
-    filamentLine(-84, -137, hx, -156, -60, -200, color);
-    text('PRO', 44, -6, 7, '#f08a2c', 'center', 'bold');
+    rect(-74, -124, 14, 4, '#6b737c'); drawSpool(-84, -122, 15, FIL_COLOR[p.spool.type], sf);
+    if (p.spool.g > 0) filamentLine(-84, -137, hx, -156, -60, -200, FIL_COLOR[p.spool.type]);
+    text('PRO', 44, -6, 8, '#f08a2c', 'center', 'bold');
     if (p.status === 'clog') spaghetti(hx, bedY - 26, color, p.slot + 3);
   } else {
     poly([[-70, -186], [70, -186], [86, -198], [-54, -198]], '#f0f2f4'); rect(-70, -186, 140, 186, '#dde1e5');
@@ -689,9 +858,9 @@ function drawPrinter(p, x, y, stockFrac) {
     rect(-62, -176, 98, 124, '#1b2730');
     ctx.save(); ctx.beginPath(); ctx.rect(-62, -176, 98, 124); ctx.clip();
     rect(-58, -166, 90, 4, '#6b737c');
-    const bedY = pr ? -146 + oh * prog : p.status === 'clog' ? -120 : -80;
+    const bedY = pr ? -146 + oh * prog : showObj ? -120 : -80;
     poly([[-50, bedY], [30, bedY], [38, bedY - 8], [-42, bedY - 8]], '#cfd4da');
-    if (pr || p.status === 'clog') drawObj(job, -10, bedY - 2, 1, p.status === 'clog' ? 0.4 : prog, color);
+    if (showObj) drawObj(objId, -10, bedY - 2, 1, objProg, objC);
     const hx = pr ? Math.sin(a * 7) * 28 - 10 : -10;
     fillRR(hx - 11, -164, 22, 16, 3, '#2f3439'); headFan(hx, -156, 5);
     poly([[hx - 3, -148], [hx + 3, -148], [hx, -145]], '#d4a017');
@@ -703,82 +872,152 @@ function drawPrinter(p, x, y, stockFrac) {
     rect(42, -172, 22, 16, pr ? '#5ad1ff' : '#24485a'); rect(44, -150, 8, 5, '#4cc36a'); rect(54, -150, 8, 5, '#e5484d');
     rect(42, -138, 22, 70, '#c9ced4'); for (let i = 0; i < 6; i++) rect(45, -132 + i * 10, 16, 2, '#9aa1a8');
     rect(-62, -44, 98, 30, '#c4c9cf'); rect(-54, -38, 44, 12, '#262b31');
-    rect(-52, -36, 40 * clamp(stockFrac, 0, 1), 8, color); rect(4, -32, 26, 4, '#8d949b');
+    rect(-52, -36, 40 * sf, 8, FIL_COLOR[p.spool.type]); rect(4, -32, 26, 4, '#8d949b');
     rect(-66, 0, 12, 4, '#3a3f45'); rect(54, 0, 12, 4, '#3a3f45');
-    text('INDUSTRIE', -13, -6, 7, '#5f6770', 'center', 'bold');
+    text('INDUSTRIE', -13, -6, 8, '#5f6770', 'center', 'bold');
   }
   ctx.restore();
 }
-function topOf(p) { return p.tier === 0 ? -214 : p.tier === 1 ? -184 : -202; }
+function topOf(p) { return (p.tier === 0 ? -214 : p.tier === 1 ? -184 : -202) * PS; }
+function drawRobot(x, y, active) { // Wartungs-Roboter: a stocky arm on the bench corner
+  const sw = active ? Math.sin(anim * 8) : 0;
+  ctx.save(); ctx.translate(x, y);
+  poly([[-9, -4], [9, -4], [12, -8], [-6, -8]], '#f5cf55'); rect(-9, -4, 18, 6, '#e0a91c');
+  rect(-6, -14, 12, 10, '#3a3f45'); ell(0, -14, 6, 3, '#55606b');
+  ctx.lineCap = 'round'; ctx.strokeStyle = '#f2c037'; ctx.lineWidth = 6;
+  const ex = 6 + sw * 2, ey = -34, hx = 18 + sw * 4, hy = -44 + sw * 3;
+  ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(ex, ey); ctx.lineTo(hx, hy); ctx.stroke();
+  ctx.strokeStyle = '#c48e12'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(ex, ey); ctx.stroke();
+  ell(ex, ey, 4, 4, '#3a3f45'); ell(0, -14, 3.5, 3.5, '#3a3f45');
+  rect(hx - 2, hy - 8, 4, 8, '#9aa3ab'); rect(hx - 6, hy - 10, 4, 6, '#9aa3ab'); rect(hx + 2, hy - 10, 4, 6, '#9aa3ab');
+  ctx.restore();
+}
+function drawFeeder(x, y, color, active) { // Filament-Zuführung: a dry box with a tube
+  rect(x - 9, y - 22, 18, 22, '#5d6670'); poly([[x - 9, y - 22], [x + 9, y - 22], [x + 13, y - 26], [x - 5, y - 26]], '#7b848e');
+  rect(x - 6, y - 18, 12, 8, '#1d2126'); rect(x - 5, y - 17, 10, 6, color);
+  rect(x - 5, y - 6, 3, 3, active ? '#4cc36a' : '#3a3f45');
+  ctx.strokeStyle = '#c9d0d6'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x, y - 26); ctx.quadraticCurveTo(x - 4, y - 70, x - 30, y - 95); ctx.stroke();
+}
+function drawPlayer(pl, s = 1) {
+  const sw = pl.moving ? Math.sin(pl.walk) : 0;
+  ctx.save(); ctx.translate(pl.x, pl.y); ctx.scale(s * pl.dir, s);
+  ell(0, 0, 14, 5, 'rgba(0,0,0,0.3)');
+  rect(-6 + sw * 2, -16, 5, 16, '#2b3a55'); rect(1 - sw * 2, -16, 5, 16, '#2b3a55');
+  rect(-7 + sw * 2, -3, 7, 3, '#1b1f24'); rect(1 - sw * 2, -3, 7, 3, '#1b1f24');
+  fillRR(-9, -36, 18, 22, 4, '#3a6fd8'); rect(-6, -34, 12, 14, '#2f5bb5'); rect(-6, -36, 2, 8, '#f2c037'); rect(4, -36, 2, 8, '#f2c037');
+  rect(-12, -35 - sw * 2, 4, 15, '#3a6fd8'); rect(8, -35 + sw * 2, 4, 15, '#3a6fd8');
+  ell(-10, -19 - sw * 2, 2.5, 2.5, '#f0c8a0'); ell(10, -19 + sw * 2, 2.5, 2.5, '#f0c8a0');
+  fillRR(-7, -50, 14, 14, 4, '#f0c8a0');
+  rect(1, -45, 2, 2, '#1b1f24'); rect(-3, -45, 2, 2, '#1b1f24');
+  fillRR(-8, -54, 16, 6, 3, '#f08a2c'); rect(2, -50, 9, 3, '#f08a2c');
+  ctx.restore();
+}
 function bubble(x, y, s, c) {
   ctx.font = `bold 12px ${FONT}`; const w = ctx.measureText(s).width + 16;
   fillRR(x - w / 2, y - 12, w, 22, 8, c); poly([[x - 6, y + 9], [x + 6, y + 9], [x, y + 16]], c);
   text(s, x, y - 1, 12, '#fff', 'center', 'bold');
 }
-function wrenchIcon(x, y, c) {
-  ctx.save(); ctx.translate(x, y); ctx.rotate(-0.7);
-  rect(-1.5, -2, 3, 9, c); ctx.beginPath(); ctx.arc(0, -5, 4, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); rect(-1.2, -10, 2.4, 5, '#00000055');
-  ctx.restore();
+function arrowDown(x, y, c) {
+  const b = Math.sin(anim * 6) * 5;
+  poly([[x - 10, y - 18 + b], [x + 10, y - 18 + b], [x, y - 4 + b]], c); rect(x - 4, y - 30 + b, 8, 13, c);
 }
 
 // ---- Drawing: the workshop ---------------------------------------------------------------------
+function drawVan(x, y, s, boxes) { // the delivery van, seen from behind
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+    rect(-58, -96, 116, 86, '#f4f6f8'); rect(-58, -96, 116, 8, '#d6dbe0'); rect(-1, -88, 2, 78, '#aab2ba');
+    rect(-52, -82, 44, 26, '#2d3640'); rect(8, -82, 44, 26, '#2d3640');
+    rect(-56, -50, 112, 6, '#f08a2c'); text('DRUCKFARM', 0, -35, 11, '#f08a2c', 'center', 'bold');
+    rect(-60, -12, 120, 8, '#3a3f45'); rect(-50, -6, 22, 10, '#1b1f24'); rect(28, -6, 22, 10, '#1b1f24');
+    rect(-56, -26, 8, 6, '#e5484d'); rect(48, -26, 8, 6, '#e5484d');
+    for (let i = 0; i < Math.min(8, boxes); i++) drawBox(-44 + (i % 4) * 14 + (i % 4 > 1 ? 30 : 0), -58 - Math.floor(i / 4) * 12, 0.8);
+  ctx.restore();
+}
+function rackSlot(n) { const row = Math.floor(n / 8) % 3, col = n % 8; return { x: 40 + col * 17, y: 650 - row * 40 - 4 }; }
 function drawWall() {
-  rect(0, 56, 830, 180, '#dcccb0'); rect(0, 56, 830, 10, '#c9b897');
+  rect(0, 56, 830, 186, '#dcccb0'); rect(0, 56, 830, 10, '#c9b897');
+  // shipping door with the van
+  fillRR(14, 70, 184, 24, 4, '#7a5a3a'); text('VERSAND', 106, 82, 14, '#ffe2a8', 'center', 'bold');
+  rect(16, 98, 180, 144, '#5b636b');
+  const tr = state.truck, away = tr.st === 'away';
+  const g = ctx.createLinearGradient(0, 104, 0, 240); g.addColorStop(0, '#9fd1ef'); g.addColorStop(0.6, '#d9eef8'); g.addColorStop(0.61, '#6f7479'); g.addColorStop(1, '#5a5f64');
+  ctx.fillStyle = g; ctx.fillRect(24, 104, 164, 138);
+  const drive = away ? Math.min(1, tr.t / 1.2) - Math.max(0, (tr.t - (tune.ship_time - 1.2)) / 1.2) : 0;
+  const vs = 1 - drive * 0.75, vy = 236 - drive * 50;
+  if (vs > 0.3) {
+    drawVan(106, vy, vs, away ? 0 : state.packed.length);
+  }
+  rect(16, 98, 180, 10, '#8d969e'); for (let i = 0; i < 3; i++) rect(16, 108 + i * 4, 180, 1, '#6b737c');
+  rect(12, 98, 6, 144, '#3a3f45'); rect(194, 98, 6, 144, '#3a3f45');
+  if (away) text(`Lieferwagen zurück in ${Math.ceil(tune.ship_time - tr.t)} s`, 106, 228, 12, '#fff', 'center', 'bold');
   // pegboard with tools
-  fillRR(28, 80, 292, 140, 4, '#c39a62');
-  for (let yy = 90; yy < 214; yy += 12) for (let xx = 38; xx < 314; xx += 12) rect(xx, yy, 2, 2, '#8a6a42');
-  // wrench
-  ctx.save(); ctx.translate(60, 140); ctx.rotate(0.15); rect(-3, -40, 6, 74, '#9aa3ab'); ell(0, -42, 9, 9, '#9aa3ab'); rect(-3, -52, 6, 12, '#c39a62'); ctx.restore();
-  // pliers
+  fillRR(222, 80, 230, 132, 4, '#c39a62');
+  for (let yy = 90; yy < 206; yy += 12) for (let xx = 232; xx < 446; xx += 12) rect(xx, yy, 2, 2, '#8a6a42');
+  ctx.save(); ctx.translate(250, 140); ctx.rotate(0.15); rect(-3, -40, 6, 74, '#9aa3ab'); ell(0, -42, 9, 9, '#9aa3ab'); rect(-3, -52, 6, 12, '#c39a62'); ctx.restore();
   ctx.strokeStyle = '#d0473d'; ctx.lineWidth = 6; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(98, 190); ctx.lineTo(108, 136); ctx.moveTo(122, 190); ctx.lineTo(112, 136); ctx.stroke();
-  poly([[106, 138], [114, 138], [112, 110], [108, 110]], '#8d969e');
-  // spatula
-  rect(146, 120, 5, 70, '#3a3f45'); poly([[140, 98], [157, 98], [154, 122], [143, 122]], '#c9d0d6');
-  // hex keys
-  ctx.strokeStyle = '#2f3439'; ctx.lineWidth = 3;
-  for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.moveTo(180 + i * 9, 104); ctx.lineTo(180 + i * 9, 150 + i * 8); ctx.lineTo(190 + i * 9, 150 + i * 8); ctx.stroke(); }
-  // spare spools
-  drawSpool(256, 120, 18, '#e5484d', 0.8); drawSpool(292, 120, 14, '#f5f5f0', 0.6); drawSpool(270, 178, 16, '#2b2b2b', 0.7);
+  ctx.beginPath(); ctx.moveTo(288, 190); ctx.lineTo(298, 136); ctx.moveTo(312, 190); ctx.lineTo(302, 136); ctx.stroke();
+  poly([[296, 138], [304, 138], [302, 110], [298, 110]], '#8d969e');
+  rect(336, 120, 5, 70, '#3a3f45'); poly([[330, 98], [347, 98], [344, 122], [333, 122]], '#c9d0d6');
+  drawSpool(388, 116, 16, '#e5484d', 0.8); drawSpool(422, 116, 13, '#f5f5f0', 0.6); drawSpool(404, 172, 15, '#2b2b2b', 0.7);
   // window
-  const g = ctx.createLinearGradient(0, 82, 0, 182); g.addColorStop(0, '#8fcbef'); g.addColorStop(1, '#e8f4fb');
-  rect(346, 82, 104, 100, '#7a5a3a'); ctx.fillStyle = g; ctx.fillRect(352, 88, 92, 88);
-  ell(372, 160, 16, 6, '#9bd18b'); ell(420, 166, 22, 7, '#8cc77a');
-  rect(396, 88, 4, 88, '#7a5a3a'); rect(352, 130, 92, 4, '#7a5a3a'); rect(342, 180, 112, 6, '#8d6a45');
-  // sales shelf
-  fillRR(650, 100, 150, 28, 4, '#7a5a3a'); text('VERKAUF', 725, 114, 15, '#ffe2a8', 'center', 'bold');
-  rect(486, SHELF_Y, 322, 8, '#8d6a45'); rect(486, SHELF_Y + 8, 322, 3, '#6b4f33');
-  rect(500, SHELF_Y + 10, 6, 16, '#6b4f33'); rect(788, SHELF_Y + 10, 6, 16, '#6b4f33');
-  rect(486, 140, 322, 6, '#8d6a45'); rect(500, 146, 6, 12, '#6b4f33'); rect(788, 146, 6, 12, '#6b4f33');
-  // boxes on the upper shelf
-  for (let i = 0; i < 5; i++) { const bx = 500 + i * 62; poly([[bx, 140], [bx + 34, 140], [bx + 42, 132], [bx + 8, 132]], '#d9b07a'); rect(bx, 116 + 24 - 24, 34, 24, '#c79a5f'); rect(bx + 14, 116, 6, 24, '#e6c99a'); }
-  state.shelf.forEach((s, i) => {
-    const pop = Math.min(1, s.t * 6);
-    drawObj(s.id, 505 + i * 39, SHELF_Y, 0.8 * (0.6 + 0.4 * pop), 1, s.c);
-  });
-  // baseboard + floor
-  rect(0, 232, 830, 8, '#8d6a45');
-  rect(0, 240, 830, 480, '#ad7d4c');
-  for (let r = 0, yy = 240; yy < 720; r++, yy += 28) {
+  const gw = ctx.createLinearGradient(0, 82, 0, 182); gw.addColorStop(0, '#8fcbef'); gw.addColorStop(1, '#e8f4fb');
+  rect(474, 82, 104, 100, '#7a5a3a'); ctx.fillStyle = gw; ctx.fillRect(480, 88, 92, 88);
+  ell(500, 160, 16, 6, '#9bd18b'); ell(548, 166, 22, 7, '#8cc77a');
+  rect(524, 88, 4, 88, '#7a5a3a'); rect(480, 130, 92, 4, '#7a5a3a'); rect(470, 180, 112, 6, '#8d6a45');
+  // supply shelf with boxes
+  rect(606, 140, 206, 6, '#8d6a45'); rect(606, 196, 206, 6, '#8d6a45');
+  for (let i = 0; i < 4; i++) { const bx = 616 + i * 50; rect(bx, 116, 34, 24, '#c79a5f'); rect(bx + 14, 116, 6, 24, '#e6c99a'); }
+  for (let i = 0; i < 4; i++) drawSpool(632 + i * 48, 180, 13, FIL_COLOR[FIL[i]], 0.85);
+  rect(0, 238, 830, 8, '#8d6a45');
+  rect(0, 246, 830, 474, '#ad7d4c');
+  for (let r = 0, yy = 246; yy < 720; r++, yy += 28) {
     rect(0, yy, 830, 1.5, '#86592f');
     if (r % 2) rect(0, yy + 1.5, 830, 26.5, 'rgba(0,0,0,0.04)');
     for (let xx = (r % 3) * 70 + 40; xx < 830; xx += 210) rect(xx, yy, 1.5, 28, '#8f6236');
   }
-  const sh = ctx.createLinearGradient(0, 240, 0, 300); sh.addColorStop(0, 'rgba(0,0,0,0.25)'); sh.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = sh; ctx.fillRect(0, 240, 830, 60);
+  const sh = ctx.createLinearGradient(0, 246, 0, 300); sh.addColorStop(0, 'rgba(0,0,0,0.25)'); sh.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = sh; ctx.fillRect(0, 246, 830, 54);
+  // floor markings: a walkway from the printers to the logistics corner
+  ctx.fillStyle = 'rgba(242,192,55,0.35)';
+  for (let x = 8; x < 200; x += 22) ctx.fillRect(x, 254, 12, 4);
+  ctx.fillRect(196, 254, 4, 456);
 }
 function drawBench(x0, ty, sel, ghost) {
   const w = BW, d = BD, s = BS;
-  if (ghost) {
-    ctx.save(); ctx.globalAlpha = 0.5;
-  }
-  rect(x0 + 6, ty + 22, 8, 44, '#3e444a'); rect(x0 + w - 14, ty + 22, 8, 44, '#3e444a'); rect(x0 + w + s - 10, ty - d + 22, 6, 40, '#33383d');
-  rect(x0 + 8, ty + 50, w - 16, 4, '#3e444a');
-  poly([[x0 + w, ty], [x0 + w + s, ty - d], [x0 + w + s, ty - d + 22], [x0 + w, ty + 22]], '#59616a');
+  if (ghost) { ctx.save(); ctx.globalAlpha = 0.55; }
+  rect(x0 + 6, ty + 20, 7, 40, '#3e444a'); rect(x0 + w - 13, ty + 20, 7, 40, '#3e444a'); rect(x0 + w + s - 9, ty - d + 20, 6, 36, '#33383d');
+  rect(x0 + 8, ty + 46, w - 16, 4, '#3e444a');
+  poly([[x0 + w, ty], [x0 + w + s, ty - d], [x0 + w + s, ty - d + 20], [x0 + w, ty + 20]], '#59616a');
   poly([[x0, ty], [x0 + w, ty], [x0 + w + s, ty - d], [x0 + s, ty - d]], sel ? '#b3c9dc' : '#9ca5ad');
-  rect(x0, ty, w, 22, '#6b737c'); rect(x0, ty, w, 2, '#8a939b');
+  rect(x0, ty, w, 20, '#6b737c'); rect(x0, ty, w, 2, '#8a939b');
   if (ghost) ctx.restore();
   if (sel) { poly([[x0 - 3, ty + 3], [x0 + w + 3, ty + 3], [x0 + w + s + 3, ty - d - 3], [x0 + s - 3, ty - d - 3]], null); ctx.strokeStyle = '#5ab0ff'; ctx.lineWidth = 3; ctx.stroke(); }
+}
+function drawPackTable() {
+  const [x0, y0, x1] = STATION.pack.foot, ty = 432, w = x1 - x0 - 16;
+  rect(x0 + 6, ty + 18, 7, 34, '#5b4630'); rect(x0 + w - 13, ty + 18, 7, 34, '#5b4630'); rect(x0 + w + 8, ty - 22 + 18, 6, 30, '#4a3826');
+  poly([[x0 + w, ty], [x0 + w + 16, ty - 26], [x0 + w + 16, ty - 8], [x0 + w, ty + 18]], '#7a5a3a');
+  poly([[x0, ty], [x0 + w, ty], [x0 + w + 16, ty - 26], [x0 + 16, ty - 26]], '#c29a68');
+  rect(x0, ty, w, 18, '#9a7448'); text('PACKTISCH', x0 + w / 2, ty + 9, 11, '#ffe9c2', 'center', 'bold');
+  // tape dispenser and flat cartons
+  poly([[x0 + 10, ty - 6], [x0 + 40, ty - 6], [x0 + 46, ty - 14], [x0 + 16, ty - 14]], '#d9b07a');
+  rect(x0 + 104, ty - 18, 18, 10, '#3a3f45'); ell(x0 + 113, ty - 18, 6, 6, '#c9a35a'); ell(x0 + 113, ty - 18, 2.5, 2.5, '#3a3f45');
+  void y0;
+  const q = state.packQ.length, done = state.packed.length;
+  if (q) { const it = state.packQ[0]; drawObj(it.id, x0 + 60, ty - 12, 0.8, 1, it.c); drawBox(x0 + 60, ty - 8, 1.4 * Math.min(1, state.packT / tune.pack_time)); }
+  for (let i = 0; i < Math.min(9, done); i++) drawBox(x0 + 84 + (i % 3) * 12, ty - 12 - Math.floor(i / 3) * 12, 0.9);
+  if (q) { bar(x0 + 20, ty - 52, 110, 7, 1 - q / (q + done + 0.001), '#f3c75b', '#3a3f45'); text(`Packt: noch ${q}`, x0 + 75, ty - 62, 12, '#2a1d10', 'center', 'bold'); }
+}
+function drawRack() {
+  const [x0, , x1, y1] = STATION.store.foot, w = x1 - x0;
+  const top = y1 - 128;
+  rect(x0, top, 6, 128, '#4e555d'); rect(x1 - 6, top, 6, 128, '#4e555d');
+  for (let r = 0; r < 3; r++) { const sy = y1 - 6 - r * 40; rect(x0, sy, w, 6, '#7b848e'); rect(x0, sy + 6, w, 2, '#4e555d'); }
+  rect(x0, top, w, 5, '#7b848e');
+  state.store.forEach((it, n) => { if (n < 24) { const s = rackSlot(n); drawObj(it.id, s.x + 6, s.y, 0.55, 1, it.c); } });
+  const full = state.store.length >= storeCap();
+  fillRR(x0 + 22, top - 26, w - 44, 22, 5, full ? '#b3262c' : '#2a3442');
+  text(`LAGER ${state.store.length}/${storeCap()}`, (x0 + x1) / 2, top - 15, 12, '#fff', 'center', 'bold');
 }
 function statusOf(p) {
   switch (p.status) {
@@ -786,84 +1025,91 @@ function statusOf(p) {
     case 'maint': return { s: `Wartung ${pct(p.timer / tune.maint_time)}`, c: '#5ab0ff' };
     case 'repair': return { s: `Reparatur ${pct(p.timer / tune.repair_time)}`, c: '#5ab0ff' };
     case 'clog': return { s: 'VERSTOPFT', c: '#e5484d' };
+    case 'held': return { s: 'Lager voll', c: '#ff9b5b' };
     case 'wait': return { s: p.why || 'Wartet', c: '#f39a2b' };
     default: return { s: p.auto ? 'Bereit' : 'Aus', c: '#aab3bd' };
   }
 }
-function drawSlots() {
-  const wm = mouse.in && inFloor(mouse) ? toWorld(mouse.x, mouse.y) : null;
-  const hoverSlot = wm ? [4, 5, 6, 7, 0, 1, 2, 3].find(i => inSlot(i, wm)) : undefined;
-  const hint = hintNow();
-  for (let i = 0; i < 8; i++) {
-    const sp = slotPos(i), idx = state.printers.findIndex(p => p.slot === i), p = state.printers[idx];
-    const isSel = idx === state.sel && idx >= 0;
-    drawBench(sp.x0, sp.ty, isSel, !p);
-    if (p) {
-      if (p.wear >= tune.wear_warn && p.status !== 'clog') ell(sp.bx, sp.by - 4, 72, 12, `rgba(243,154,43,${0.25 + 0.15 * Math.sin(anim * 5)})`);
-      if (p.status === 'clog') ell(sp.bx, sp.by - 4, 72, 12, 'rgba(229,72,77,0.4)');
-      drawPrinter(p, sp.bx, sp.by, state.stock[(p.cur || p).fil] / tune.pack_grams);
-      // name plate and wear bar on the bench front
-      text(`#${i + 1} ${TIER_NAME[p.tier]}`, sp.x0 + 8, sp.ty + 11, 12, '#f1f4f7', 'left', 'bold');
-      const wc = p.wear >= tune.wear_warn ? (p.wear >= tune.wear_clog_start ? '#e5484d' : '#f39a2b') : '#4cc36a';
-      bar(sp.x0 + 92, sp.ty + 7, 66, 8, p.wear / 100, wc, '#3a3f45');
-      const st = statusOf(p), top = sp.by + topOf(p) - 12;
-      if (p.status === 'clog') bubble(sp.bx, top, 'Verstopft! Reparieren', '#c9343a');
-      else if (p.status === 'maint' || p.status === 'repair') bubble(sp.bx, top, st.s, '#2d6cad');
-      else if (p.status === 'wait') bubble(sp.bx, top, st.s, '#a8641c');
-      else if (p.wear >= tune.wear_warn) bubble(sp.bx, top, `Verschleiß ${Math.round(p.wear)} %: Wartung!`, '#c8741a');
-      else if (!p.auto && p.status === 'idle') bubble(sp.bx, top, 'Aus: „Start“ klicken', '#59636f');
-      if (p.maintQueued) { ell(sp.x0 + 150, sp.ty - 40, 11, 11, '#2d6cad'); wrenchIcon(sp.x0 + 150, sp.ty - 40, '#fff'); }
-    } else {
-      const price = nextPrice(), can = state.money >= price, full = state.printers.length >= 8;
-      if (!full && hoverSlot === i) {
-        ctx.save(); ctx.globalAlpha = 0.45; drawPrinter({ tier: 0, status: 'idle', prog: 0, wear: 0, job: 'key', fil: 'cheap', slot: i }, sp.bx, sp.by, 0.6); ctx.restore();
-        bubble(sp.bx, sp.by - 230, `Drucker kaufen: ${eur(price)}`, can ? '#2f9e55' : '#59636f');
-      }
-      if (!full) {
-        const pulse = hint && hint.id === 'slot' && can;
-        fillRR(sp.x0 + 18, sp.ty + 2, BW - 36, 18, 6, pulse ? `rgba(47,158,85,${0.75 + 0.25 * Math.sin(anim * 7)})` : can ? '#2b6e40' : '#2a2f37');
-        text(`Platz frei · ${eur(price)}`, sp.x0 + BW / 2, sp.ty + 11, 12, can ? '#e9fbe9' : '#c3c9cf', 'center', 'bold');
-      }
-    }
+function drawSlot(i) {
+  const sp = slotPos(i), p = printerAt(i), near = state.near && (state.near.kind === 'printer' || state.near.kind === 'slot') && state.near.slot === i;
+  drawBench(sp.x0, sp.ty, near && p, !p);
+  if (p) {
+    if (p.wear >= tune.wear_warn && p.status !== 'clog') ell(sp.bx, sp.by - 4, 58, 10, `rgba(243,154,43,${0.25 + 0.15 * Math.sin(anim * 5)})`);
+    if (p.status === 'clog') ell(sp.bx, sp.by - 4, 58, 10, 'rgba(229,72,77,0.4)');
+    drawPrinter(p, sp.bx, sp.by, PS);
+    if (p.autoMaint) drawRobot(sp.x0 + 12, sp.ty - 6, p.status === 'maint');
+    if (p.autoFeed) drawFeeder(sp.x0 + BW + 4, sp.ty - 8, FIL_COLOR[p.fil], p.status === 'print');
+    text(`#${i + 1} ${TIER_NAME[p.tier]}`, sp.x0 + 6, sp.ty + 10, 12, '#f1f4f7', 'left', 'bold');
+    const wc = p.wear >= tune.wear_warn ? (p.wear >= tune.wear_clog_start ? '#e5484d' : '#f39a2b') : '#4cc36a';
+    bar(sp.x0 + 78, sp.ty + 6, 44, 8, p.wear / 100, wc, '#3a3f45');
+    const st = statusOf(p), top = sp.by + topOf(p) - 10;
+    if (p.status === 'clog') bubble(sp.bx, top, 'Verstopft!', '#c9343a');
+    else if (p.status === 'maint' || p.status === 'repair') bubble(sp.bx, top, st.s, '#2d6cad');
+    else if (p.status === 'held') bubble(sp.bx, top, 'Lager voll', '#b3262c');
+    else if (p.status === 'wait') bubble(sp.bx, top, st.s, '#a8641c');
+    else if (p.wear >= tune.wear_warn) bubble(sp.bx, top, `Verschleiß ${Math.round(p.wear)} %`, '#c8741a');
+    else if (!p.auto && p.status === 'idle') bubble(sp.bx, top, 'Aus', '#59636f');
+  } else if (state.printers.length < 8) {
+    const can = state.money >= nextPrice();
+    if (near) { ctx.save(); ctx.globalAlpha = 0.45; drawPrinter({ tier: 0, status: 'idle', prog: 0, wear: 0, job: 'key', spool: { type: 'cheap', g: 0 }, slot: i }, sp.bx, sp.by, PS); ctx.restore(); }
+    fillRR(sp.x0 + 10, sp.ty + 1, BW - 20, 18, 6, can ? '#2b6e40' : '#2a2f37');
+    text(`Platz frei · ${eur(nextPrice())}`, sp.x0 + BW / 2, sp.ty + 10, 12, can ? '#e9fbe9' : '#c3c9cf', 'center', 'bold');
   }
-  // flying sold items
+}
+function drawWorld() {
+  drawWall();
+  const list = [];
+  for (let i = 0; i < 8; i++) list.push([slotPos(i).ty + 20, () => drawSlot(i)]);
+  list.push([STATION.pack.foot[3], drawPackTable]);
+  list.push([STATION.store.foot[3], drawRack]);
+  list.push([state.player.y, () => drawPlayer(state.player)]);
+  list.sort((a, b) => a[0] - b[0]);
+  for (const [, f] of list) f();
+  // hint arrow over the place the hint points at
+  const h = hintNow();
+  if (h && h.at && !state.banner) {
+    let x, y;
+    if (h.at === 'pack') { x = 105; y = 360; } else if (h.at === 'ship') { x = 106; y = 100; }
+    else if (h.at === 'slot') { const fr = [1, 2, 3, 4, 5, 6, 7].find(i => !printerAt(i)); if (fr !== undefined) { const s = slotPos(fr); x = s.bx; y = s.ty - 60; } }
+    else if (h.at[0] === 'p') { const p = printerAt(+h.at.slice(1)); if (p) { const s = slotPos(p.slot); x = s.bx; y = s.by + topOf(p) - 30; } }
+    if (x !== undefined) arrowDown(x, y, '#ffd166');
+  }
   for (const f of state.flying) {
-    const t = f.t, x = f.x0 + (f.x1 - f.x0) * t, y = f.y0 + (f.y1 - f.y0) * t - Math.sin(t * Math.PI) * 90;
-    drawObj(f.id, x, y, 0.9, 1, f.c);
+    const t = f.t, x = f.x0 + (f.x1 - f.x0) * t, y = f.y0 + (f.y1 - f.y0) * t - Math.sin(t * Math.PI) * 80;
+    drawObj(f.id, x, y, 0.8, 1, f.c);
   }
   for (const f of state.fx) {
     ctx.globalAlpha = clamp(1.4 - f.t / f.life * 1.4, 0, 1);
-    ctx.font = `bold 17px ${FONT}`; ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(20,20,20,0.7)'; ctx.textAlign = 'center';
-    ctx.strokeText(f.s, f.x, f.y); text(f.s, f.x, f.y, 17, f.c, 'center', 'bold'); ctx.globalAlpha = 1;
+    ctx.font = `bold 15px ${FONT}`; ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(20,20,20,0.7)'; ctx.textAlign = 'center';
+    ctx.strokeText(f.s, f.x, f.y); text(f.s, f.x, f.y, 15, f.c, 'center', 'bold'); ctx.globalAlpha = 1;
+  }
+  // the prompts, over the player's head (ProximityPrompt)
+  const pr = prompts();
+  if (pr.length) {
+    const pl = state.player; ctx.font = `bold 12px ${FONT}`;
+    const w = Math.max(...pr.map(q => ctx.measureText(q[1]).width)) + 40, h2 = pr.length * 22 + 8;
+    let x = pl.x + 20, y = pl.y - 40 - h2 / 2;
+    if (x + w > 826) x = pl.x - 20 - w;
+    y = clamp(y, 96, 712 - h2);
+    fillRR(x, y, w, h2, 7, 'rgba(18,21,26,0.88)');
+    pr.forEach((q, i) => { keyChip(x + 6, y + 15 + i * 22, q[0], !q[3]); text(q[1], x + 30, y + 15 + i * 22, 12, q[3] ? '#f1f4f7' : '#9aa5b1', 'left', 'bold'); });
   }
 }
 function drawFloorView() {
   ctx.save(); ctx.beginPath(); ctx.rect(FX0, FY0, FW, FH); ctx.clip();
   ctx.translate(FCX, FCY); ctx.scale(cam.zoom, cam.zoom); ctx.translate(-cam.cx, -cam.cy);
-  drawWall(); drawSlots();
+  drawWorld();
   ctx.restore();
-  // ledger chips (screen space)
-  state.ledger.slice(0, 3).forEach((l, i) => {
-    const x = 10 + i * 272, y = 684;
-    fillRR(x, y, 264, 28, 6, 'rgba(25,28,33,0.82)');
-    const c = l.amt > 0 ? '#7ee08f' : l.amt < 0 ? '#ff8a8a' : '#f3b25b';
-    text(l.amt === 0 ? '±0 €' : (l.amt > 0 ? '+' : '') + eur(l.amt), x + 10, y + 14, 13, c, 'left', 'bold');
-    ctx.font = `12px ${FONT}`; let s = l.text; while (ctx.measureText(s).width > 170 && s.length > 4) s = s.slice(0, -2);
-    if (s !== l.text) s += '…';
-    text(s, x + 84, y + 14, 12, '#d6dce2', 'left');
-  });
-  // hint or goal banner
   const b = state.banner, h = hintNow();
-  const show = b ? { s: b.s, c: b.c } : h ? { s: h.s, c: h.id === 'warn' ? '#b3262c' : '#2a3442' } : null;
+  const show = b ? { s: b.s, c: b.c } : h ? { s: h.s, c: h.warn ? '#b3262c' : '#2a3442' } : null;
   if (show) {
-    ctx.font = `bold 15px ${FONT}`; const w = Math.min(800, ctx.measureText(show.s).width + 40);
-    const k = b ? 1 : 0.85 + 0.15 * Math.sin(anim * 5);
-    ctx.globalAlpha = k; fillRR(FCX - w / 2, 60, w, 30, 10, show.c); ctx.globalAlpha = 1;
+    ctx.font = `bold 15px ${FONT}`; const w = Math.min(810, ctx.measureText(show.s).width + 40);
+    ctx.globalAlpha = b ? 1 : 0.85 + 0.15 * Math.sin(anim * 5); fillRR(FCX - w / 2, 60, w, 30, 10, show.c); ctx.globalAlpha = 1;
     text(show.s, FCX, 75, 15, '#fff', 'center', 'bold');
   }
 }
 
-// ---- Drawing: HUD and side panel -------------------------------------------------------------
+// ---- Drawing: HUD and side panel (ScreenGui in Roblox) --------------------------------------------
 function drawHUD() {
   rect(0, 0, W, 56, '#1f2329'); rect(0, 55, W, 1, '#353b44');
   text(eur(state.money), 18, 28, 28, state.money < 0 ? '#ff6b6b' : '#7ee08f', 'left', 'bold');
@@ -874,65 +1120,114 @@ function drawHUD() {
   const outT = Object.values(state.today.out).reduce((a, b) => a + b, 0);
   text(`Heute: +${eur(state.today.inc)}`, 600, 20, 13, '#7ee08f', 'left', 'bold');
   text(`ausgegeben ${eur(outT)}`, 600, 38, 13, '#ff9b9b', 'left');
-  text('Klick: wählen / kaufen · Mausrad: Zoom · 1-8 Drucker · Leertaste Start', 1268, 20, 12, '#9aa5b1', 'right');
-  text('W Wartung · R Reparieren · F Filament · B Drucker · P Pause · M Ton' + (muted ? ' (aus)' : ''), 1268, 38, 12, '#9aa5b1', 'right');
+  text('WASD / Pfeile: laufen · Klick auf den Boden: hinlaufen · Mausrad: Zoom', 1268, 20, 12, '#9aa5b1', 'right');
+  text('E Aktion · F Filament · R Wartung · Q Filamentsorte · T Auftrag · U Upgrade · P Pause · M Ton' + (muted ? ' (aus)' : ''), 1268, 38, 12, '#9aa5b1', 'right');
 }
 function card(x, y, w, h, title) {
   fillRR(x, y, w, h, 8, '#2c323a'); text(title, x + 12, y + 14, 14, '#ffd98a', 'left', 'bold');
 }
 function spoolIcon(f) { return (x, y) => drawSpool(x, y, 10, FIL_COLOR[f], 0.8); }
-function drawPanel() {
-  rect(830, 56, 450, 664, '#22272e');
-  const hint = hintNow();
-  // Lager
-  card(838, 62, 436, 158, 'Filament-Lager');
-  text(`Pack = ${tune.pack_grams} g`, 1262, 76, 12, '#9aa5b1', 'right');
-  FIL.forEach((f, i) => {
-    const y = 88 + i * 32, d = filDef(f), un = filUnlocked(f);
-    drawSpool(858, y + 13, 11, d.color, Math.min(1, state.stock[f] / tune.pack_grams));
-    text(d.name, 876, y + 6, 13, un ? '#f1f4f7' : '#7d8794', 'left', 'bold');
-    text(`Fehler ${Math.round(d.fail * 100)} % · Wert ×${num(d.value)}`, 876, y + 21, 12, '#9aa5b1', 'left');
-    const low = state.stock[f] < 60 && un;
-    text(`${Math.round(state.stock[f])} g`, 1080, y + 13, 14, low ? '#ffb15e' : '#f1f4f7', 'right', 'bold');
-    if (un) button(1094, y, 172, 27, `Kaufen  ${eur(d.price)}`, () => buyFil(f), { enabled: state.money >= d.price, pulse: hint && hint.id === 'buyfil' && (f === 'cheap' || f === 'plus'), size: 13 });
-    else text(f === 'petg' ? 'braucht Pro-Drucker' : 'braucht Industrie', 1180, y + 13, 12, '#7d8794', 'center');
-  });
-  // Selected printer
-  const p = state.printers[state.sel];
-  card(838, 226, 436, 330, `Drucker #${p.slot + 1} · ${TIER_NAME[p.tier]}`);
-  const td = tierDef(p.tier), st = statusOf(p);
-  text(st.s, 1262, 240, 13, st.c, 'right', 'bold');
+function panelPrinter(p, hint) {
+  const td = tierDef(p.tier), st = statusOf(p), f = filDef(p.fil);
+  card(838, 62, 436, 404, `Drucker #${p.slot + 1} · ${TIER_NAME[p.tier]}`);
+  text(st.s, 1262, 76, 13, st.c, 'right', 'bold');
   const wc = p.wear >= tune.wear_warn ? (p.wear >= tune.wear_clog_start ? '#e5484d' : '#f39a2b') : '#4cc36a';
-  text(`Verschleiß ${Math.round(p.wear)} %`, 850, 262, 12, '#c6cdd5', 'left');
-  bar(960, 257, 302, 10, p.wear / 100, wc);
-  text(`Tempo ×${num(td.speed)} · Verschleiß ${num(td.wear)} %/s · ab ${tune.wear_clog_start} % Gefahr: Verstopfung`, 850, 280, 12, '#9aa5b1', 'left');
-  text('Druckauftrag (läuft in Schleife)', 850, 300, 12, '#c6cdd5', 'left', 'bold');
-  OBJ.forEach((o, i) => {
-    const d = objDef(o), x = 846 + (i % 2) * 212, y = 310 + Math.floor(i / 2) * 44;
-    const owned = state.plans[o], tierOk = d.tier <= p.tier;
+  text(`Verschleiß ${Math.round(p.wear)} %`, 850, 98, 12, '#c6cdd5', 'left');
+  bar(960, 93, 302, 10, p.wear / 100, wc);
+  // spool
+  const sd = filDef(p.spool.type), o = objDef(p.job);
+  drawSpool(864, 132, 16, sd.color, clamp(p.spool.g / tune.pack_grams, 0, 1));
+  text(`Spule: ${p.spool.g > 0 ? sd.name : 'leer'}`, 888, 122, 13, '#f1f4f7', 'left', 'bold');
+  text(`${Math.round(p.spool.g)} g · reicht für ${Math.floor(p.spool.g / o.g)}× ${OBJ_SHORT[p.job]}`, 888, 141, 12, p.spool.g < o.g ? '#ffb15e' : '#9aa5b1', 'left');
+  const swap = p.spool.type !== p.fil && p.spool.g > 0;
+  button(1080, 112, 186, 40, `Nachfüllen ${eur(f.price)}`, () => refill(p), { key: 'F', sub: swap ? `Wechsel: ${Math.round(p.spool.g)} g weg` : `+${tune.pack_grams} g ${f.name}`, subC: swap ? '#ffb15e' : undefined, enabled: state.money >= f.price, pulse: hint && hint.id === 'refill' });
+  text('Filamentsorte (Q)', 850, 166, 12, '#c6cdd5', 'left', 'bold');
+  text(`Fehler ${Math.round(f.fail * 100)} % · Wert ×${num(f.value)}`, 1262, 166, 12, '#9aa5b1', 'right');
+  FIL.forEach((fi, i) => button(846 + i * 106, 176, 100, 28, FIL_SHORT[fi], () => chooseFil(p, fi), { enabled: FIL_TIER[fi] <= p.tier, active: p.fil === fi, icon: spoolIcon(fi) }));
+  text('Auftrag (T, läuft in Schleife)', 850, 218, 12, '#c6cdd5', 'left', 'bold');
+  OBJ.forEach((ob, i) => {
+    const d = objDef(ob), x = 846 + (i % 2) * 212, y = 228 + Math.floor(i / 2) * 42;
+    const owned = state.plans[ob], tierOk = d.tier <= p.tier;
     let sub, en = true, subC;
-    const f = filDef(p.fil);
     if (!owned) { sub = `Bauplan kaufen: ${eur(d.plan)}`; en = state.money >= d.plan; subC = '#ffd98a'; }
     else if (!tierOk) { sub = `braucht ${TIER_NAME[d.tier]}-Drucker`; en = false; }
     else sub = `${eur(d.price * f.value)} · ${d.g} g · ${num(d.time / td.speed)} s`;
-    button(x, y, 206, 40, d.name, () => chooseJob(p, o), { sub, enabled: en, active: owned && p.job === o, subC, icon: (ix, iy) => drawObj(o, ix, iy + 11, 0.62, 1, owned ? f.color : '#6c7682') });
+    button(x, y, 206, 38, d.name, () => chooseJob(p, ob), { sub, enabled: en, active: owned && p.job === ob, subC, icon: (ix, iy) => drawObj(ob, ix, iy + 11, 0.62, 1, owned ? f.color : '#6c7682') });
   });
-  text('Filament für diesen Drucker', 850, 448, 12, '#c6cdd5', 'left', 'bold');
-  FIL.forEach((f, i) => {
-    const ok = FIL_TIER[f] <= p.tier;
-    button(846 + i * 106, 458, 100, 30, FIL_SHORT[f], () => chooseFil(p, f), { enabled: ok, active: p.fil === f, icon: spoolIcon(f) });
-  });
-  const by = 500;
-  const runLabel = p.auto ? 'Stopp' : 'Start';
-  button(846, by, 92, 46, runLabel, () => toggleRun(p), { bg: p.auto ? '#7a3b3b' : '#2f8a4c', pulse: hint && hint.id === 'start' && state.printers.indexOf(p) === state.sel && !p.auto, size: 15, sub: p.auto ? 'Schleife an' : 'Schleife aus' });
-  const mOk = p.status !== 'clog' && p.status !== 'maint' && p.status !== 'repair' && state.money >= td.maint;
-  button(944, by, 104, 46, p.maintQueued ? 'Wartung geplant' : 'Wartung', () => doMaint(p), { sub: eur(td.maint) + (p.status === 'print' ? ' · nach Druck' : ''), enabled: mOk, pulse: hint && hint.id === 'maint', active: p.maintQueued });
-  button(1054, by, 104, 46, 'Reparieren', () => doRepair(p), { sub: eur(td.repair), enabled: p.status === 'clog' && state.money >= td.repair, pulse: hint && hint.id === 'repair' && p.status === 'clog', bg: p.status === 'clog' ? '#9a3036' : undefined });
-  if (p.tier < 2) {
-    const upOk = state.money >= td.upgrade && !busy(p);
-    button(1164, by, 104, 46, `Auf ${TIER_NAME[p.tier + 1]}`, () => doUpgrade(p), { sub: busy(p) ? 'erst stoppen' : eur(td.upgrade), enabled: upOk, bg: '#6a4a9a' });
-  } else text('Höchste Stufe', 1216, by + 23, 12, '#9aa5b1', 'center');
-  // Goals
+  const by = 358;
+  button(846, by, 120, 40, p.auto ? 'Stopp' : 'Start', () => toggleRun(p), { key: 'E', bg: p.auto ? '#7a3b3b' : '#2f8a4c', pulse: hint && hint.id === 'start' && !p.auto, size: 14, sub: p.auto ? 'Schleife an' : 'Schleife aus' });
+  if (p.status === 'clog') button(972, by, 144, 40, 'Reparieren', () => doRepair(p), { key: 'R', sub: eur(td.repair), enabled: state.money >= td.repair, bg: '#9a3036', pulse: hint && hint.id === 'repair' });
+  else button(972, by, 144, 40, p.maintQueued ? 'Wartung geplant' : 'Wartung', () => doMaint(p), { key: 'R', sub: eur(td.maint) + (p.status === 'print' ? ' · nach Druck' : ''), enabled: p.status !== 'maint' && p.status !== 'repair' && p.status !== 'held' && state.money >= td.maint, active: p.maintQueued, pulse: hint && hint.id === 'maint' });
+  if (p.tier < 2) button(1122, by, 144, 40, `Auf ${TIER_NAME[p.tier + 1]}`, () => doUpgrade(p), { key: 'U', sub: busy(p) ? 'erst Druck abwarten' : eur(td.upgrade), enabled: state.money >= td.upgrade && !busy(p), bg: '#6a4a9a' });
+  else text('Höchste Stufe', 1194, by + 20, 12, '#9aa5b1', 'center');
+  text('Automatisierung für diesen Drucker', 850, 410, 12, '#c6cdd5', 'left', 'bold');
+  button(846, 420, 208, 40, p.autoMaint ? 'Wartungs-Roboter aktiv' : 'Wartungs-Roboter', () => buyAuto(p, 'maint'), { sub: p.autoMaint ? `wartet ab ${tune.auto_maint_at} % (kostet je Wartung)` : `${eur(tune.auto_maint_price)} · wartet selbst`, enabled: p.autoMaint || state.money >= tune.auto_maint_price, active: p.autoMaint, bg: '#7a5e14', pulse: hint && hint.id === 'auto' && !p.autoMaint });
+  button(1058, 420, 208, 40, p.autoFeed ? 'Filament-Zuführung aktiv' : 'Filament-Zuführung', () => buyAuto(p, 'feed'), { sub: p.autoFeed ? 'kauft nach, wenn leer' : `${eur(tune.auto_feed_price)} · füllt selbst nach`, enabled: p.autoFeed || state.money >= tune.auto_feed_price, active: p.autoFeed, bg: '#7a5e14', pulse: hint && hint.id === 'auto' && !p.autoFeed });
+}
+function panelOverview() {
+  card(838, 62, 436, 404, 'Werkstatt-Übersicht');
+  text('Lauf zu einem Drucker oder einer Station', 1262, 76, 12, '#9aa5b1', 'right');
+  text('Drucker', 850, 100, 12, '#c6cdd5', 'left', 'bold'); text('Status', 960, 100, 12, '#c6cdd5', 'left', 'bold');
+  text('Verschleiß', 1090, 100, 12, '#c6cdd5', 'left', 'bold'); text('Spule', 1262, 100, 12, '#c6cdd5', 'right', 'bold');
+  for (let i = 0; i < 8; i++) {
+    const y = 124 + i * 34, p = printerAt(i);
+    fillRR(846, y - 14, 420, 28, 5, '#353c45');
+    if (!p) { text(`#${i + 1}  Platz frei`, 856, y, 13, '#9aa5b1', 'left'); continue; }
+    const st = statusOf(p);
+    text(`#${i + 1} ${TIER_NAME[p.tier]}`, 856, y, 13, '#f1f4f7', 'left', 'bold');
+    text(st.s, 960, y, 13, st.c, 'left', 'bold');
+    bar(1090, y - 4, 80, 8, p.wear / 100, p.wear >= tune.wear_warn ? '#f39a2b' : '#4cc36a');
+    text(`${Math.round(p.spool.g)} g`, 1262, y, 13, p.spool.g < objDef(p.job).g ? '#ffb15e' : '#f1f4f7', 'right', 'bold');
+    if (p.autoMaint || p.autoFeed) text((p.autoMaint ? 'R' : '') + (p.autoFeed ? 'Z' : ''), 1196, y, 11, '#f2c037', 'center', 'bold');
+  }
+  text('R = Wartungs-Roboter · Z = Filament-Zuführung', 850, 410, 12, '#9aa5b1', 'left');
+  text('Tipp: auf den Boden klicken läuft dorthin', 850, 432, 12, '#9aa5b1', 'left');
+}
+function panelStation(kind, hint) {
+  const pr = prompts();
+  if (kind === 'slot') {
+    card(838, 62, 436, 404, `Freier Platz #${state.near.slot + 1}`);
+    drawPrinter({ tier: 0, status: 'idle', prog: 0, wear: 0, job: 'key', spool: { type: 'cheap', g: 0 }, slot: 0 }, 1056, 300, 0.9);
+    text('Neuer Starter-Drucker. Die Spule ist leer: danach F für Filament.', 1056, 330, 12, '#c6cdd5');
+    text(`Jeder weitere Drucker kostet ${Math.round((tune.printer_price_growth - 1) * 100)} % mehr.`, 1056, 350, 12, '#9aa5b1');
+  } else if (kind === 'pack') {
+    card(838, 62, 436, 404, 'Packtisch');
+    text(`Im Lager: ${state.store.length} Teile`, 850, 104, 15, '#f1f4f7', 'left', 'bold');
+    text(`Karton: ${eur(tune.pack_cost)} pro Teil · ${num(tune.pack_time, 2)} s pro Teil`, 850, 128, 12, '#9aa5b1', 'left');
+    text(`In Arbeit: ${state.packQ.length} · fertig verpackt: ${state.packed.length}`, 850, 150, 13, '#c6cdd5', 'left');
+    for (let i = 0; i < Math.min(12, state.packed.length); i++) drawBox(870 + (i % 6) * 34, 220 + Math.floor(i / 6) * 32, 1.6);
+  } else if (kind === 'ship') {
+    card(838, 62, 436, 404, 'Versandtor');
+    const v = state.packed.reduce((a, b) => a + b, 0);
+    text(`Pakete bereit: ${state.packed.length} · Wert ${eur(v)}`, 850, 104, 15, '#f1f4f7', 'left', 'bold');
+    text(state.truck.st === 'dock' ? 'Lieferwagen steht am Tor' : `Lieferwagen unterwegs: ${state.truck.n} Pakete, ${eur(state.truck.value)}, zurück in ${Math.ceil(tune.ship_time - state.truck.t)} s`, 850, 128, 12, '#c6cdd5', 'left');
+    text('Das Geld kommt, wenn der Lieferwagen zurück ist.', 850, 150, 12, '#9aa5b1', 'left');
+    text(state.autoShip ? `Auto-Versand aktiv: packt und verschickt alle ${tune.auto_ship_every} s.` : 'Auto-Versand: Förderband + Packautomat, kein Laufen mehr nötig.', 850, 172, 12, state.autoShip ? '#7ee08f' : '#9aa5b1', 'left');
+  } else if (kind === 'store') {
+    card(838, 62, 436, 404, 'Lager-Regal');
+    text(`Belegt: ${state.store.length} / ${storeCap()}`, 850, 104, 15, state.store.length >= storeCap() ? '#ff8a8a' : '#f1f4f7', 'left', 'bold');
+    const v = state.store.reduce((a, b) => a + b.v, 0);
+    text(`Wert im Regal: ${eur(v)} (erst verpacken und verschicken)`, 850, 128, 12, '#c6cdd5', 'left');
+    text('Ist das Regal voll, bleiben fertige Teile im Drucker und er steht still.', 850, 150, 12, '#9aa5b1', 'left');
+  }
+  pr.forEach((q, i) => button(846, 380 - (pr.length - 1 - i) * 48, 420, 42, q[1], q[2], { key: q[0], enabled: q[3], bg: '#2f8a4c', size: 14, pulse: hint && ((hint.id === 'pack' && kind === 'pack') || (hint.id === 'ship' && kind === 'ship') || (hint.id === 'slot' && kind === 'slot')) && i === 0 }));
+}
+function drawPanel() {
+  rect(830, 56, 450, 664, '#22272e');
+  const hint = hintNow(), n = state.near;
+  if (n && n.kind === 'printer') panelPrinter(printerAt(n.slot), hint);
+  else if (n) panelStation(n.kind, hint);
+  else panelOverview();
+  // operations
+  card(838, 472, 436, 84, 'Betrieb');
+  const full = state.store.length >= storeCap();
+  text(`Lager ${state.store.length}/${storeCap()}`, 850, 500, 13, full ? '#ff8a8a' : '#f1f4f7', 'left', 'bold');
+  text(`Packtisch ${state.packQ.length ? 'packt ' + state.packQ.length : 'frei'}`, 970, 500, 13, '#f1f4f7', 'left', 'bold');
+  text(`Pakete ${state.packed.length}`, 1110, 500, 13, '#f1f4f7', 'left', 'bold');
+  text(state.truck.st === 'dock' ? 'Lieferwagen: am Tor' : `Lieferwagen: zurück in ${Math.ceil(tune.ship_time - state.truck.t)} s (${eur(state.truck.value)})`, 850, 524, 12, '#c6cdd5', 'left');
+  text(state.autoShip ? 'Auto-Versand: an' : 'Auto-Versand: nein', 1262, 524, 12, state.autoShip ? '#7ee08f' : '#9aa5b1', 'right');
+  bar(850, 538, 412, 6, state.store.length / storeCap(), full ? '#e5484d' : '#5ab0ff');
+  // goals
   card(838, 562, 436, 152, 'Ziele');
   const rows = [['Jetzt', goal(state.ms)], ['Nächstes', goal(state.ms + 1)], ['Groß', bigGoal(state.big)]];
   rows.forEach(([lab, g], i) => {
@@ -940,34 +1235,50 @@ function drawPanel() {
     text(lab, 850, y + 6, 12, i === 0 ? '#ffd98a' : '#9aa5b1', 'left', 'bold');
     text(g.t(), 920, y + 6, 13, '#f1f4f7', 'left', i === 0 ? 'bold' : '');
     text(`+${eur(g.r)}`, 1262, y + 6, 12, '#7ee08f', 'right', 'bold');
-    const c = near ? `rgba(255,209,102,${0.7 + 0.3 * Math.sin(anim * 8)})` : '#4cc36a';
-    bar(920, y + 18, 270, 8, pr, i === 1 ? '#6d7886' : c);
+    bar(920, y + 18, 270, 8, pr, i === 1 ? '#6d7886' : near ? `rgba(255,209,102,${0.7 + 0.3 * Math.sin(anim * 8)})` : '#4cc36a');
     text(near ? 'fast geschafft!' : pct(pr), 1262, y + 22, 12, near ? '#ffd166' : '#9aa5b1', 'right', near ? 'bold' : '');
   });
-  for (const c of state.confetti) {
-    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); rect(-4, -2, 8, 4, c.c); ctx.restore();
-  }
+  for (const c of state.confetti) { ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); rect(-4, -2, 8, 4, c.c); ctx.restore(); }
+}
+function drawLedger() {
+  state.ledger.slice(0, 3).forEach((l, i) => {
+    const x = 10 + i * 272, y = 688;
+    fillRR(x, y, 264, 26, 6, 'rgba(25,28,33,0.82)');
+    const c = l.amt > 0 ? '#7ee08f' : l.amt < 0 ? '#ff8a8a' : '#f3b25b';
+    text(l.amt === 0 ? '±0 €' : (l.amt > 0 ? '+' : '') + eur(l.amt), x + 10, y + 13, 13, c, 'left', 'bold');
+    ctx.font = `12px ${FONT}`; let s = l.text; while (ctx.measureText(s).width > 170 && s.length > 4) s = s.slice(0, -2);
+    if (s !== l.text) s += '…';
+    text(s, x + 84, y + 13, 12, '#d6dce2', 'left');
+  });
 }
 
 // ---- Scenes ----------------------------------------------------------------------------------
-function drawPlay() { ui = []; clear('#15181c'); drawFloorView(); drawHUD(); drawPanel(); }
+function drawPlay() { ui = []; clear('#15181c'); drawFloorView(); drawLedger(); drawHUD(); drawPanel(); }
 function overlay(x, y, w, h) { rect(0, 0, W, H, 'rgba(10,12,15,0.6)'); fillRR(x, y, w, h, 14, '#262c34'); rr(x, y, w, h, 14); ctx.strokeStyle = '#4a5260'; ctx.lineWidth = 2; ctx.stroke(); }
-const demoP = { tier: 1, status: 'print', prog: 0, wear: 20, job: 'dragon', fil: 'petg', slot: 2, cur: { job: 'dragon', fil: 'petg' } };
+const demoP = { tier: 1, status: 'print', prog: 0, wear: 20, job: 'dragon', fil: 'petg', spool: { type: 'petg', g: 200 }, slot: 2, cur: { job: 'dragon', fil: 'petg' } };
 const scenes = {
   figures: {
     update(dt) { state.t += dt; },
     draw() {
-      ui = []; clear('#2a2f36'); rect(0, 380, W, 340, '#ad7d4c');
-      text('Druckfarm: alle Figuren', W / 2, 30, 22, '#fff', 'center', 'bold');
+      ui = []; clear('#2a2f36'); rect(0, 300, W, 420, '#ad7d4c');
+      text('Druckfarm: alle Figuren', W / 2, 24, 20, '#fff', 'center', 'bold');
+      const sp = t => ({ type: t, g: 200 });
       const ps = [
-        [{ tier: 0, status: 'print', prog: 0.6, wear: 10, job: 'key', fil: 'cheap', slot: 0, cur: { job: 'key', fil: 'cheap' } }, 'Starter-Drucker'],
-        [{ tier: 1, status: 'print', prog: 0.6, wear: 10, job: 'holder', fil: 'plus', slot: 1, cur: { job: 'holder', fil: 'plus' } }, 'Pro-Drucker'],
-        [{ tier: 2, status: 'print', prog: 0.6, wear: 10, job: 'drone', fil: 'resin', slot: 2, cur: { job: 'drone', fil: 'resin' } }, 'Industrie-Drucker'],
-        [{ tier: 0, status: 'clog', prog: 0, wear: 100, job: 'dragon', fil: 'plus', slot: 3 }, 'Verstopft (Spaghetti)'],
+        [{ tier: 0, status: 'print', prog: 0.6, wear: 10, job: 'key', spool: sp('cheap'), slot: 0, cur: { job: 'key', fil: 'cheap' } }, 'Starter-Drucker'],
+        [{ tier: 1, status: 'print', prog: 0.6, wear: 10, job: 'holder', spool: sp('plus'), slot: 1, cur: { job: 'holder', fil: 'plus' } }, 'Pro-Drucker'],
+        [{ tier: 2, status: 'print', prog: 0.6, wear: 10, job: 'drone', spool: sp('resin'), slot: 2, cur: { job: 'drone', fil: 'resin' } }, 'Industrie-Drucker'],
+        [{ tier: 0, status: 'clog', prog: 0, wear: 100, job: 'dragon', spool: sp('plus'), slot: 3 }, 'Verstopft (Spaghetti)'],
       ];
-      ps.forEach(([p, n], i) => { const x = 170 + i * 310; drawPrinter(p, x, 330, 0.7); text(n, x, 356, 16, '#fff', 'center', 'bold'); });
-      OBJ.forEach((o, i) => { const x = 120 + i * 205; drawObj(o, x, 520, 2.4, 1, FIL_COLOR[FIL[i % 4]]); text(OBJ_NAME[o], x, 548, 15, '#fff', 'center', 'bold'); });
-      FIL.forEach((f, i) => { const x = 250 + i * 260; drawSpool(x, 630, 26, FIL_COLOR[f], 0.8); text(FIL_NAME[f] + '-Spule', x, 678, 15, '#fff', 'center', 'bold'); });
+      ps.forEach(([p, n], i) => { const x = 110 + i * 200; drawPrinter(p, x, 250, 0.9); text(n, x, 274, 14, '#fff', 'center', 'bold'); });
+      drawRobot(880, 250, true); text('Wartungs-Roboter', 880, 274, 14, '#fff', 'center', 'bold');
+      drawFeeder(1052, 250, FIL_COLOR.petg, true); text('Filament-Zuführung', 1052, 274, 14, '#fff', 'center', 'bold');
+      drawPlayer({ x: 1180, y: 250, dir: 1, walk: 1, moving: true }, 1.6); text('Spieler', 1180, 274, 14, '#fff', 'center', 'bold');
+      OBJ.forEach((o, i) => { const x = 110 + i * 150; drawObj(o, x, 400, 2.2, 1, FIL_COLOR[FIL[i % 4]]); text(OBJ_NAME[o], x, 426, 13, '#fff', 'center', 'bold'); });
+      drawBox(1000, 400, 3); text('Paket', 1000, 426, 13, '#fff', 'center', 'bold');
+      FIL.forEach((f, i) => { const x = 110 + i * 150; drawSpool(x, 520, 24, FIL_COLOR[f], 0.8); text(FIL_NAME[f] + '-Spule', x, 560, 13, '#fff', 'center', 'bold'); });
+      drawVan(760, 660, 0.9, 4); text('Lieferwagen', 760, 686, 13, '#fff', 'center', 'bold');
+      ctx.save(); ctx.translate(860, 150); drawPackTable(); ctx.restore(); text('Packtisch', 962, 660, 13, '#fff', 'center', 'bold');
+      ctx.save(); ctx.translate(1060, 20); drawRack(); ctx.restore(); text('Lager-Regal', 1162, 700, 13, '#fff', 'center', 'bold');
     },
   },
   title: {
@@ -978,33 +1289,37 @@ const scenes = {
     },
     draw() {
       ui = [];
-      const st = state; drawWall(); state = st;
-      rect(0, 0, W, H, 'rgba(0,0,0,0)');
+      clear('#15181c'); drawWall();
       rect(830, 56, 450, 664, '#ad7d4c'); rect(0, 0, W, 56, '#1f2329');
-      demoP.prog = (anim / 14) % 1; drawBench(470, 600, false, false); drawPrinter(demoP, slotPos(4).bx + 440, 587, 0.8);
-      fillRR(60, 300, 520, 360, 16, 'rgba(24,28,34,0.9)');
-      text(TITLE, 320, 350, 56, '#ffd98a', 'center', 'bold');
-      text('Ein 3D-Drucker-Business von der Garage zur Farm', 320, 392, 16, '#d6dce2');
-      const lines = ['Filament kaufen: billig = mehr Fehldrucke, gut = mehr Wert', 'Drucken und verkaufen geht automatisch in Schleife', 'Verschleiß im Blick: Wartung ist billig, Verstopfung teuer', 'Mehr Drucker, bessere Drucker, neue Baupläne', 'Miete am Tagesende: zweimal im Minus = Pleite'];
-      lines.forEach((l, i) => text(l, 90, 432 + i * 24, 14, '#c6cdd5', 'left'));
+      demoP.prog = (anim / 14) % 1; drawBench(860, 600, false, false); drawPrinter(demoP, 860 + BW / 2 + BS / 2, 589, 1);
+      drawPlayer({ x: 1150, y: 640, dir: -1, walk: anim * 10, moving: false }, 1.8);
+      fillRR(60, 270, 560, 400, 16, 'rgba(24,28,34,0.92)');
+      text(TITLE, 340, 316, 56, '#ffd98a', 'center', 'bold');
+      text('Ein 3D-Drucker-Business von der Garage zur Farm', 340, 358, 16, '#d6dce2');
+      const lines = ['Lauf zu deinen Druckern: jeder braucht eigenes Filament und Wartung',
+        'Fertige Teile kommen ins Lager: verpacken, verschicken, kassieren',
+        'Billiges Filament = mehr Fehldrucke, gutes = mehr Wert',
+        'Wartung ist billig, Verstopfung teuer',
+        'Später automatisieren: Wartungs-Roboter, Zuführung, Auto-Versand',
+        'Miete am Tagesende: zweimal im Minus = Pleite'];
+      lines.forEach((l, i) => text(l, 90, 396 + i * 24, 14, '#c6cdd5', 'left'));
       const s = loadSave();
-      button(90, 568, 210, 50, 'Neues Spiel', () => { clearSave(); reset(); scene = 'play'; }, { bg: '#2f8a4c', size: 17, sub: 'Enter / Klick' });
-      if (s) button(320, 568, 230, 50, `Weiter: Tag ${s.day}`, () => continueGame(s), { bg: '#2d6cad', size: 17, sub: eur(s.money) });
-      text('Steuerung: Maus (klicken, Mausrad zoomt) · Tasten im Spiel unten rechts erklärt', 320, 640, 12, '#9aa5b1');
+      button(90, 552, 220, 50, 'Neues Spiel', () => { clearSave(); reset(); scene = 'play'; }, { bg: '#2f8a4c', size: 17, sub: 'Enter / Klick' });
+      if (s) button(330, 552, 240, 50, `Weiter: Tag ${s.day}`, () => continueGame(s), { bg: '#2d6cad', size: 17, sub: eur(s.money) });
+      text('Laufen: WASD oder Pfeiltasten · E: Aktion am Drucker oder an der Station', 340, 628, 13, '#9aa5b1');
     },
   },
   play: {
     update(dt) {
       if (pressed('KeyP') || pressed('Escape')) { scene = 'pause'; return; }
       handleClicks();
-      const p = state.printers[state.sel];
-      for (let i = 1; i <= 8; i++) if (pressed('Digit' + i)) { const idx = state.printers.findIndex(q => q.slot === i - 1); if (idx >= 0) state.sel = idx; }
-      if (pressed('Space')) toggleRun(p);
-      if (pressed('KeyW')) doMaint(p);
-      if (pressed('KeyR')) doRepair(p);
-      if (pressed('KeyF')) buyFil(p.fil);
-      if (pressed('KeyU')) doUpgrade(p);
-      if (pressed('KeyB')) { for (let i = 0; i < 8; i++) if (!state.printers.some(q => q.slot === i)) { buyPrinter(i); break; } }
+      const n = state.near, p = n && n.kind === 'printer' ? printerAt(n.slot) : null;
+      if (pressed('KeyE') || pressed('Space') || pressed('Enter')) pressPrompt('E');
+      if (pressed('KeyF')) { if (p) refill(p); else pressPrompt('F'); }
+      if (pressed('KeyR') && p) doMaint(p);
+      if (pressed('KeyQ') && p) cycleFil(p);
+      if (pressed('KeyT') && p) cycleJob(p);
+      if (pressed('KeyU') && p) doUpgrade(p);
       updatePlay(dt);
     },
     draw: drawPlay,
@@ -1018,21 +1333,21 @@ const scenes = {
     update() { handleClicks(); if (pressed('Enter') || pressed('Space')) scene = 'play'; },
     draw() {
       drawPlay(); ui = [];
-      const s = state.summary; overlay(360, 120, 560, 480);
-      text(`Tag ${s.day} vorbei`, 640, 160, 30, '#ffd98a', 'center', 'bold');
-      text('Einnahmen', 400, 205, 15, '#7ee08f', 'left', 'bold'); text('+' + eur(s.inc), 880, 205, 15, '#7ee08f', 'right', 'bold');
-      let y = 236;
-      text('Ausgaben', 400, y, 15, '#ff9b9b', 'left', 'bold'); y += 26;
-      for (const [k, v] of Object.entries(s.out)) { if (v <= 0) continue; text(k, 420, y, 14, '#d6dce2', 'left'); text('−' + eur(v).replace('−', ''), 880, y, 14, '#ff9b9b', 'right'); y += 22; }
-      text('Miete + Strom', 420, y, 14, '#d6dce2', 'left'); text('−' + eur(s.rent), 880, y, 14, '#ff9b9b', 'right'); y += 30;
+      const s = state.summary; overlay(360, 100, 560, 520);
+      text(`Tag ${s.day} vorbei`, 640, 140, 30, '#ffd98a', 'center', 'bold');
+      text('Einnahmen (Lieferungen + Ziele)', 400, 182, 15, '#7ee08f', 'left', 'bold'); text('+' + eur(s.inc), 880, 182, 15, '#7ee08f', 'right', 'bold');
+      let y = 212;
+      text('Ausgaben', 400, y, 15, '#ff9b9b', 'left', 'bold'); y += 24;
+      for (const [k, v] of Object.entries(s.out)) { if (v <= 0) continue; text(k, 420, y, 14, '#d6dce2', 'left'); text('−' + eur(v).replace('−', ''), 880, y, 14, '#ff9b9b', 'right'); y += 21; }
+      text('Miete + Strom', 420, y, 14, '#d6dce2', 'left'); text('−' + eur(s.rent), 880, y, 14, '#ff9b9b', 'right'); y += 28;
       rect(400, y - 12, 480, 1, '#4a5260');
       text('Gewinn heute', 400, y + 4, 17, '#fff', 'left', 'bold'); text((s.profit >= 0 ? '+' : '') + eur(s.profit), 880, y + 4, 17, s.profit >= 0 ? '#7ee08f' : '#ff6b6b', 'right', 'bold');
-      y += 36;
-      text(`Verkauft: ${s.prints - s.fails} · Fehldrucke: ${s.fails} · Verstopfungen: ${s.clogs}`, 640, y, 14, '#c6cdd5'); y += 26;
-      text(`Kasse jetzt: ${eur(state.money)} · Miete morgen: ${eur(rentToday())}`, 640, y, 14, '#c6cdd5');
-      if (s.warn) text('MAHNUNG: Du bist im Minus. Beende den nächsten Tag im Plus, sonst Pleite!', 640, 528, 14, '#ff6b6b', 'center', 'bold');
-      else text('Gespeichert.', 640, 528, 13, '#9aa5b1');
-      button(540, 548, 200, 40, 'Weiter', () => { scene = 'play'; }, { bg: '#2f8a4c', size: 16 });
+      y += 34;
+      text(`Gedruckt: ${s.prints - s.fails} · Fehldrucke: ${s.fails} · Verstopfungen: ${s.clogs} · verschickt: ${s.shipped}`, 640, y, 13, '#c6cdd5'); y += 24;
+      text(`Kasse jetzt: ${eur(state.money)} · Miete morgen: ${eur(rentToday())}`, 640, y, 13, '#c6cdd5');
+      if (s.warn) text('MAHNUNG: Du bist im Minus. Beende den nächsten Tag im Plus, sonst Pleite!', 640, 548, 14, '#ff6b6b', 'center', 'bold');
+      else text('Gespeichert.', 640, 548, 13, '#9aa5b1');
+      button(540, 566, 200, 40, 'Weiter', () => { scene = 'play'; }, { bg: '#2f8a4c', size: 16 });
     },
   },
   over: {
@@ -1043,7 +1358,7 @@ const scenes = {
       text('Pleite!', 640, 250, 48, '#ff6b6b', 'center', 'bold');
       text(state.overReason, 640, 305, 15, '#f1f4f7');
       text(state.gained, 640, 340, 15, '#c6cdd5');
-      text(`Gedruckt: ${state.stats.prints} · Fehldrucke: ${state.stats.fails} · Verstopfungen: ${state.stats.clogs} · Wartungen: ${state.stats.maint}`, 640, 370, 13, '#9aa5b1');
+      text(`Gedruckt: ${state.stats.prints} · Fehldrucke: ${state.stats.fails} · Verstopfungen: ${state.stats.clogs} · Lieferungen: ${state.stats.shipped}`, 640, 370, 13, '#9aa5b1');
       button(520, 410, 240, 50, 'Neue Werkstatt', () => { reset(); scene = 'play'; }, { bg: '#2f8a4c', size: 17, sub: 'R / Enter / Klick' });
     },
   },
